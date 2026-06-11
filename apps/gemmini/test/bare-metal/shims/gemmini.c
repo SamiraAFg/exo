@@ -20,9 +20,17 @@ void tiled_matmul_auto(size_t dim_I, size_t dim_J, size_t dim_K,
 
   if (dim_I == 512 && dim_J == 512 && dim_K == 512) {
     // 512x512x512
-    printf("Calling 512 matmul\n");
+    // printf("Calling 512 matmul new2\n");
     gemmini_lib_Context *ctxt;
     matmul_512x512x512(ctxt, &c_scale, act_, A, B, C);
+    // matmul_XxXx512_new(ctxt, dim_I, dim_J, &c_scale, act_, A, B, C);
+    // matmul_XxXx512_new_bias(ctxt, dim_I, dim_J, &c_scale, act_, A, B, D, C);
+    // gemmini_fence();
+  // } else if (dim_I == 128 && dim_J == 128 && dim_K == 128) {
+  //   // matmul_4
+  //   // printf("Calling matmul_128\n");
+  //   gemmini_lib_Context *ctxt;
+  //   matmul_128(ctxt, &c_scale, act_, A, B, C);
   } else if (dim_I == 12544 && dim_J == 256 && dim_K == 64) {
     // matmul_4
     printf("Calling matmul_4\n");

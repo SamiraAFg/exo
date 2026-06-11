@@ -1,0 +1,36 @@
+def matmul_on_cpu(
+    N: size,
+    M: size,
+    K: size,
+    scale: f32,
+    act: bool,
+    A: i8[N, K] @ DRAM,
+    B: i8[K, M] @ DRAM,
+    C: i8[N, M] @ DRAM,
+):
+    for i in seq(0, N):
+        for j in seq(0, M):
+            res: i32 @ DRAM
+            res = 0.0
+            for k in seq(0, K):
+                a: i8 @ DRAM
+                a = A[i, k]
+
+                b: i8 @ DRAM
+                b = B[k, j]
+
+                a2: i32
+                b2: i32
+                a2 = a
+                b2 = b
+                res += a2 * b2
+
+            src_tmp: i32
+            src_tmp = res
+            tmp_res1: f32
+            acc_scale(src_tmp, tmp_res1, scale)
+            tmp_res2: i8
+            clamp(tmp_res1, tmp_res2)
+            if act == True:
+                tmp_res2 = relu(tmp_res2)
+            C[i, j] = tmp_res2

@@ -93,7 +93,8 @@ g = divide_loop(g, i_loop, 8, ["io", "ii"], perfect=True)
 
 # Divide the j loop by 8
 g = divide_loop(g, j_loop, 8, ["jo", "ji"], perfect=True)
-
+print("3.5: loop after tiling")
+print(j_loop)
 # Now, we want to reorder ii and jo loops, by lifting the scope of j_loop
 # We can still use the j_loop cursor!
 g1 = lift_scope(g, j_loop)
@@ -104,8 +105,9 @@ assert g1 == g2
 
 print("4: Tiled gemv")
 print(g1)
-print("4: g.forward(j_loop) points to:")
+print("4: g/g1.forward(j_loop) points to:")
 print(g.forward(j_loop))
+print(g1.forward(j_loop))
 print()
 
 

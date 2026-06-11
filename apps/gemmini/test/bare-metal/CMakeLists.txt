@@ -17,6 +17,25 @@ target_link_libraries(exo-gemmini_shim PRIVATE exo-gemmini::gemmini_lib)
 # ---------------------------------------------------------------------------- #
 # Matmul tests
 
+function(test_tiled_matmul_ws_orig suffix i j k)
+    add_executable(
+        "tiled_matmul_ws_orig${suffix}"
+        "${gemmini-rocc-tests_SOURCE_DIR}/bareMetalC/tiled_matmul_ws_orig.c"
+    )
+    target_compile_definitions(
+        "tiled_matmul_ws_orig${suffix}"
+        PRIVATE
+        "MAT_DIM_I=${i}"
+        "MAT_DIM_J=${j}"
+        "MAT_DIM_K=${k}"
+    )
+    target_link_libraries("tiled_matmul_ws_orig${suffix}" PRIVATE exo-gemmini::shim exo-gemmini::rt)
+    add_test(
+        NAME "tiled_matmul_ws_orig${suffix}"
+        COMMAND "tiled_matmul_ws_orig${suffix}"
+    )
+endfunction()
+
 function(test_tiled_matmul_ws suffix i j k)
     add_executable(
         "tiled_matmul_ws${suffix}"
@@ -28,6 +47,7 @@ function(test_tiled_matmul_ws suffix i j k)
         "MAT_DIM_I=${i}"
         "MAT_DIM_J=${j}"
         "MAT_DIM_K=${k}"
+        # "NO_BIAS=0"
     )
     target_link_libraries("tiled_matmul_ws${suffix}" PRIVATE exo-gemmini::shim exo-gemmini::rt)
     add_test(
@@ -35,8 +55,13 @@ function(test_tiled_matmul_ws suffix i j k)
         COMMAND "tiled_matmul_ws${suffix}"
     )
 endfunction()
-
-test_tiled_matmul_ws(""   512   512  512)
+test_tiled_matmul_ws("-exo2-64" 64 64 64)
+test_tiled_matmul_ws("-exo2-128" 128 128 128)
+test_tiled_matmul_ws("-exo2-256" 256 256 256)
+test_tiled_matmul_ws("-exo2-512" 512 512 512)
+# test_tiled_matmul_ws("-128" 128 128 128)
+# test_tiled_matmul_ws("exo_512"   512   512  512)
+# test_tiled_matmul_ws_orig("-128"   128 128 128)
 test_tiled_matmul_ws("-2" 12544 64   256)
 test_tiled_matmul_ws("-3" 12544 256  64 )
 test_tiled_matmul_ws("-4" 3136  512  128)

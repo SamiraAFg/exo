@@ -26,13 +26,18 @@
 static float c_scale[1] = {2.0f};
 static int8_t x[NN * KK];
 static int8_t y[KK * MM];
+static int32_t bias[MM]; // Bias array for the new matmul with bias
 static int8_t z_cpu[NN * MM] = {0};
 static int8_t z_gemmini[NN * MM] = {0};
 
 int main() {
-  // gemm_init_mem();
-  // gemm_acc_init_mem();
+  gemm_init_mem();
+  gemm_acc_init_mem();
   gemmini_flush(0);
+
+  for (int i = 0; i < MM; i++) {
+    bias[i] = i * 2; // Initialize bias values
+  }
 
   for (int i = 0; i < NN; i++) {
     for (int j = 0; j < KK; j++) {
@@ -49,14 +54,15 @@ int main() {
   gemmini_lib_Context *ctxt;
 
   unsigned long cpu_start = read_cycles();
-  CPU_KERNEL_FN(ctxt, c_scale, false, x, y, z_cpu);
-  // CPU_KERNEL_FN(ctxt,NN, MM, c_scale, false, x, y, z_cpu);
+  CPU_KERNEL_FN(ctxt, c_scale, false, x, y, bias, z_cpu);
+  // CPU_KERNEL_FN(ctxt,NN, MM, c_scale, false, x, y, bias, z_cpu);
   gemmini_fence();
   unsigned long cpu_stop = read_cycles();
-  printf("Cycles for CPU version: %ld\n", cpu_stop - cpu_start);
+  printf("Cycles for CPU versionnnn: %ld\n", cpu_stop - cpu_start);
 
   unsigned long gemmini_start = read_cycles();
-  KERNEL_FN(ctxt, c_scale, false, x, y, z_gemmini);
+  KERNEL_FN(ctxt, c_scale, false, x, y, bias, z_gemmini);
+  // KERNEL_FN(ctxt, NN, MM, c_scale, false, x, y, bias, z_gemmini);
   gemmini_fence();
   unsigned long gemmini_stop = read_cycles();
   printf("Cycles for GEMMINI version: %ld\n", gemmini_stop - gemmini_start);

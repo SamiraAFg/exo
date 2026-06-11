@@ -415,13 +415,13 @@ _gemm_ld_i8_block_id1 = (
     "gemmini_extended3_config_ld({src}.strides[0]*1, "
     + "1.0f, 0, 1);\n"
     + "gemmini_extended_mvin2( &{src_data}, "
-    + "((uint64_t) &{dst_data}), 16*{m}, {n} );"
+    + "((uint64_t) &{dst_data}), {mi}*{m}, {n} );"
 )
 _gemm_ld_i8_block_id2 = (
     "gemmini_extended4_config_ld({src}.strides[0]*1, "
     + "1.0f, 0, {n}, 2);\n"
     + "gemmini_extended_mvin3( &{src_data}, "
-    + "((uint64_t) &{dst_data}), 16*{m}, {n} );"
+    + "((uint64_t) &{dst_data}), {mi}*{m}, {n} );"
 )
 
 
@@ -725,39 +725,39 @@ def config_ld_acc_i32_vector(stride_set: bool):
 
 _gemm_ld_acc_i32_vec = (
     "gemmini_extended3_config_ld(0, 1.0f, 0, 0);\n"
-    + "gemmini_extended_mvin( ((uint64_t) &{src_data}), ((uint32_t) &{dst_data}), {m}, {n} );"  # 16 -> m
+    + "gemmini_extended_mvin( ((uint64_t) &{src_data}), ((uint32_t) &{dst_data}), {m}, {n} );"
 )
 
 
 @instr(_gemm_ld_acc_i32_vec)
 def ld_acc_i32_vector(
     n: size,
-    m: size,  # added dynamic size
+    m: size,
     src: [i32][1, m] @ DRAM,
     dst: [i32][n, m] @ GEMM_ACCUM,
 ):
     assert n <= 16
-    assert m <= 16  # added dynamic size
+    assert m <= 16
     assert stride(dst, 0) == 1
     assert stride(src, 0) == 1
 
     for i in seq(0, n):
-        for j in seq(0, m):  # Samira changed this to dynamic size
+        for j in seq(0, m):
             dst[i, j] = src[0, j]
 
 
-_do_gemm_ld_acc_i32_vec = "gemmini_extended_mvin( ((uint64_t) &{src_data}), ((uint32_t) &{dst_data}), {m}, {n} );"  # 16 -> n
+_do_gemm_ld_acc_i32_vec = "gemmini_extended_mvin( ((uint64_t) &{src_data}), ((uint32_t) &{dst_data}), {m}, {n} );"
 
 
 @instr(_do_gemm_ld_acc_i32_vec)
 def do_ld_acc_i32_vector(
     n: size,
-    m: size,  # added dynamic size
-    src: [i32][1, 16] @ DRAM,
-    dst: [i32][n, 16] @ GEMM_ACCUM,
+    m: size,
+    src: [i32][1, m] @ DRAM,
+    dst: [i32][n, m] @ GEMM_ACCUM,
 ):
     assert n <= 16
-    assert m <= 16  # added dynamic size
+    assert m <= 16
     assert stride(dst, 0) == 1
     assert stride(src, 0) == 1
 
@@ -1315,202 +1315,3 @@ matmul_acc_i8 = make_instr(matmul_acc_i8, _gemm_config_matmul + _gemm_matmul_acc
 # --------------------------------------------------------------------------- #
 #
 # --------------------------------------------------------------------------- #
-# --- new patterns ---
-# _gemm_ld_i8_block_new = (
-#     "gemmini_extended3_config_ld({src}.strides[0]*1, "
-#     + "1.0f, 0, 0);\n"
-#     + "gemmini_extended_mvin( &{src_data}, "
-#     + "((uint64_t) &{dst_data}), {m}, {n} );"
-# )
-
-
-# @instr(_gemm_ld_i8_block_new)
-# def ld_i8_block_new(
-#     n: size,
-#     m: size,
-#     src: [i8][n, m] @ DRAM,
-#     dst: [i8][n, m] @ GEMM_SCRATCH,
-# ):
-#     assert n <= 16
-#     assert m <= 64
-#     assert stride(src, 1) == 1
-#     assert stride(dst, 0) == 16
-#     assert stride(dst, 1) == 1
-
-#     for i in seq(0, n):
-#         for j in seq(0, m):
-#             dst[i, j] = src[i, j]
-
-
-# def make_do_ld_i8_block_new(name, instr_str, p=ld_i8_block_new):
-#     p = rename(p, name)
-#     p = make_instr(p, instr_str)
-#     return p
-
-
-# _do_gemm_ld_i8_block_id2_new = (
-#     "gemmini_extended_mvin3( &{src_data}, " + "((uint64_t) &{dst_data}), {m}, {n} );"
-# )
-# _do_gemm_ld_i8_block_id1_new = (
-#     "gemmini_extended_mvin2( &{src_data}, " + "((uint64_t) &{dst_data}), {m}, {n} );"
-# )
-# do_ld_i8_block_id2_new = make_do_ld_i8_block_new(
-#     "do_ld_i8_block_id2_new", _do_gemm_ld_i8_block_id2_new
-# )
-# do_ld_i8_block_id1_new = make_do_ld_i8_block_new(
-#     "do_ld_i8_block_id1_new", _do_gemm_ld_i8_block_id1_new
-# )
-
-# _gemm_ld_i8_block_id2_new = (
-#     "gemmini_extended4_config_ld({src}.strides[0]*1, "
-#     + "1.0f, 0, {n}, 2);\n"
-#     + "gemmini_extended_mvin3( &{src_data}, "
-#     + "((uint64_t) &{dst_data}), {m}, {n} );"
-# )
-# _gemm_ld_i8_block_id1_new = (
-#     "gemmini_extended3_config_ld({src}.strides[0]*1, "
-#     + "1.0f, 0, 1);\n"
-#     + "gemmini_extended_mvin2( &{src_data}, "
-#     + "((uint64_t) &{dst_data}), {m}, {n} );"
-# )
-
-
-# def make_ld_i8_block_new(name, ld_id, p=ld_i8_block_new, stride_val=None):
-#     if ld_id == 1:
-#         ConfigLoad = ConfigLoad_id1
-#         do_ld_i8_block = do_ld_i8_block_id1_new
-#         config_ld_i8 = config_ld_i8_id1
-#         write_stride = "ConfigLoad_id1.src_stride = _"
-#         _gemm_ld_i8_block = _gemm_ld_i8_block_id1_new
-#     else:
-#         ConfigLoad = ConfigLoad_id2
-#         do_ld_i8_block = do_ld_i8_block_id2_new
-#         config_ld_i8 = config_ld_i8_id2
-#         write_stride = "ConfigLoad_id2.src_stride = _"
-#         _gemm_ld_i8_block = _gemm_ld_i8_block_id2_new
-
-#     if stride_val:
-#         p = write_config(p, p.body().before(), ConfigLoad, "src_stride", stride_val)
-#         p = replace(p, "for i in _:_", do_ld_i8_block)
-#         p = replace(p, write_stride, config_ld_i8)
-
-#     p = rename(p, name)
-#     p = make_instr(p, _gemm_ld_i8_block)
-#     return p
-
-
-# ld_i8_block_id2_new = make_ld_i8_block_new("ld_i8_block_id2_new", 2)
-# ld_i8_block_id2_v2_new = make_ld_i8_block_new(
-#     "ld_i8_block_id2_v2_new", 2, stride_val="stride(src,0)"
-# )
-
-# ld_i8_block_id1_new = make_ld_i8_block_new("ld_i8_block_id1_new", 1)
-# ld_i8_block_id1_v2_new = make_ld_i8_block_new(
-#     "ld_i8_block_id1_v2_new", 1, stride_val="stride(src,0)"
-# )
-
-
-# --------------------------------------------------------------------------- #
-# conv patterns
-# --------------------------------------------------------------------------- #
-# _gemm_ld_i8_block_conv = (
-#     "gemmini_extended3_config_ld({src}.strides[0]*1, "
-#     + "1.0f, 0, 0);\n"
-#     + "gemmini_extended_mvin( &{src_data}, "
-#     + "((uint64_t) &{dst_data}), 16*{m}, {n} );"
-# )
-
-
-# @instr(_gemm_ld_i8_block_conv)
-# def ld_i8_block_conv(
-#     B: size,
-#     OH: size,
-#     OW: size,
-#     KH: size,
-#     KW: size,
-#     KCH: size,
-#     n: size,
-#     m: size,
-#     src: [i8][n/(OH*OW), n/(B*OW), n/(B*OH), (m*16)/(KW*KH)] @ DRAM,
-#     dst: [i8][n, m, 16] @ GEMM_SCRATCH,
-# ):
-#     assert n <= 16
-#     assert m <= 4
-#     assert stride(src, 1) == 1
-#     assert stride(dst, 0) == 16
-#     assert stride(dst, 1) == 1
-
-#     for ko in seq(0, m):
-#         for i in seq(0, n):
-#             for ki in seq(0, 16):
-#                 dst[ko, i, ki] = src[i/(OH*OW), (i%(OH*OW))/OW + (ko * 16 + ki)/(KCH*KW), (i%(OH*OW))%OW + (ko * 16 + ki)/KCH % KW, (ko * 16 + ki)%KCH]
-#     # for i in seq(0, n):
-#     #     for j in seq(0, m):
-#     #         for k in seq(0, 16):
-#     #             dst[j, i, k] = src[i, 16 * j + k]
-
-# def make_do_ld_i8_block_conv(name, instr_str, p=ld_i8_block_conv):
-#     p = rename(p, name)
-#     p = make_instr(p, instr_str)
-#     return p
-
-
-# # _do_gemm_ld_i8_block_id2_new = (
-# #     "gemmini_extended_mvin3( &{src_data}, " + "((uint64_t) &{dst_data}), {m}, {n} );"
-# # )
-# _do_gemm_ld_i8_block_id1_conv = (
-#     "gemmini_extended_mvin2( &{src_data}, " + "((uint64_t) &{dst_data}), {m}, {n} );"
-# )
-# # do_ld_i8_block_id2_new = make_do_ld_i8_block_new(
-# #     "do_ld_i8_block_id2_new", _do_gemm_ld_i8_block_id2_new
-# # )
-# do_ld_i8_block_id1_conv = make_do_ld_i8_block_conv(
-#     "do_ld_i8_block_id1_new", _do_gemm_ld_i8_block_id1_conv
-# )
-
-# # _gemm_ld_i8_block_id2_new = (
-# #     "gemmini_extended4_config_ld({src}.strides[0]*1, "
-# #     + "1.0f, 0, {n}, 2);\n"
-# #     + "gemmini_extended_mvin3( &{src_data}, "
-# #     + "((uint64_t) &{dst_data}), {m}, {n} );"
-# # )
-# _gemm_ld_i8_block_id1_conv = (
-#     "gemmini_extended3_config_ld({src}.strides[0]*1, "
-#     + "1.0f, 0, 1);\n"
-#     + "gemmini_extended_mvin2( &{src_data}, "
-#     + "((uint64_t) &{dst_data}), {m}, {n} );"
-# )
-
-
-# def make_ld_i8_block_conv(name, ld_id, p=ld_i8_block_conv, stride_val=None):
-#     if ld_id == 1:
-#         ConfigLoad = ConfigLoad_id1
-#         do_ld_i8_block = do_ld_i8_block_id1_conv
-#         config_ld_i8 = config_ld_i8_id1
-#         write_stride = "ConfigLoad_id1.src_stride = _"
-#         _gemm_ld_i8_block = _gemm_ld_i8_block_id1_conv
-#     # else:
-#     #     ConfigLoad = ConfigLoad_id2
-#     #     do_ld_i8_block = do_ld_i8_block_id2_conv
-#     #     config_ld_i8 = config_ld_i8_id2
-#     #     write_stride = "ConfigLoad_id2.src_stride = _"
-#     #     _gemm_ld_i8_block = _gemm_ld_i8_block_id2_conv
-#     if stride_val:
-#         p = write_config(p, p.body().before(), ConfigLoad, "src_stride", stride_val)
-#         p = replace(p, "for i in _:_", do_ld_i8_block)
-#         p = replace(p, write_stride, config_ld_i8)
-
-#     p = rename(p, name)
-#     p = make_instr(p, _gemm_ld_i8_block)
-#     return p
-
-
-# # ld_i8_block_id2_new = make_ld_i8_block_new("ld_i8_block_id2_new", 2)
-# # ld_i8_block_id2_v2_new = make_ld_i8_block_new(
-# #     "ld_i8_block_id2_v2_new", 2, stride_val="stride(src,0)"
-# # )
-
-# ld_i8_block_id1_conv = make_ld_i8_block_conv("ld_i8_block_id1_conv", 1)
-# ld_i8_block_id1_v2_conv = make_ld_i8_block_conv(
-#     "ld_i8_block_id1_v2_conv", 1, stride_val="stride(src,0)"
-# )

@@ -1,0 +1,456 @@
+from __future__ import annotations
+
+import os
+import sys
+
+from exo.libs.memories import GEMM_SCRATCH, GEMM_ACCUM
+from exo import proc, instr, DRAM, config, ExoType
+from exo.stdlib.scheduling import *
+from exo.stdlib.stdlib import *
+from exo.stdlib.inspection import *
+from exo.platforms.gemmini import (
+    ld_i8_block_id1,
+    ld_i8_block_id1_v2,
+    # ld_i8_block_id1_conv,
+    # ld_i8_block_id1_v2_conv,
+    ld_i8_block_id2,
+    ld_i8_block_id2_v2,
+    ld_acc_i32_vector,
+    ld_acc_i32_vector_v2,
+    zero_acc_i32,
+    zero_acc_i32_v2,
+    matmul_acc_i8,
+    matmul_acc_i8_v2,
+    st_acc_i8,
+    st_acc_i8_v2,
+    acc_scale,
+    clamp,
+)
+from gemmini_schedules import *
+
+from scheduler import Scheduler, MatMulMapping
+
+ld_i8_block_id1 = reorder_loops(ld_i8_block_id1, "i j")
+ld_i8_block_id2 = reorder_loops(ld_i8_block_id2, "i j")
+
+
+def matmul_algorithm():
+    @proc
+    def matmul(
+        N: size,
+        M: size,
+        K: size,
+        scale: f32,
+        act: bool,
+        A: i8[N, K] @ DRAM,
+        B: i8[K, M] @ DRAM,
+        D: i32[1, M] @ DRAM,
+        C: i8[N, M] @ DRAM,
+    ):
+
+        # Algorithm starts here
+        for i in seq(0, N):
+            for j in seq(0, M):
+                res: i32 @ DRAM
+                res = D[0, j]
+                for k in seq(0, K):
+                    a2: i32
+                    b2: i32
+                    a2 = A[i, k]
+                    b2 = B[k, j]
+                    res += a2 * b2
+
+                src_tmp: i32
+                src_tmp = res
+                tmp_res1: f32
+                acc_scale(src_tmp, tmp_res1, scale)
+                tmp_res2: i8
+                clamp(tmp_res1, tmp_res2)
+                if act == True:
+                    tmp_res2 = relu(tmp_res2)
+                C[i, j] = tmp_res2
+        # Algorithm ends here. 23 lines excluding newlines
+
+    return matmul
+
+
+class GemminiScheduler(Scheduler):
+    def get_load_a_pat(self):
+        return ("i", "k"), (1, 4, 16, 16)
+
+    def get_load_b_pat(self):
+        return ("k", "j"), (1, 4, 16, 16)
+
+    def get_init_out_pat(self):
+        return ("i", "j"), (16, 16)
+
+    def get_gemm_pat(self):
+        return ("i", "j", "k"), (16, 16, 16)
+
+    def get_store_pat(self):
+        return ("i", "j"), (16, 16)
+
+
+def generate_sample3_schedule():
+    K = 512
+    M = 1024
+    N = 256
+    cpu = rename(
+        matmul_algorithm(), "matmul_on_cpu"
+    )  # Rename "matmul" to "matmul_on_cpu"
+    cpu = cpu.partial_eval(N=N, M=M, K=K)
+    # cpu = cpu.add_assertion("N % 256 == 0")
+    # cpu = cpu.add_assertion("M % 256 == 0")
+
+    # Rename the procedure to "matmul_on_gemmini"
+    gemmini = rename(cpu, "matmul_on_gemmini")
+
+    print("")
+    print("===== THIS IS THE ORIGINAL MATMUL ALGORITHM BEFORE SCHEDULING ====")
+    print(gemmini)
+    print("===== THIS IS THE ORIGINAL MATMUL ALGORITHM BEFORE SCHEDULING ====")
+    print("")
+
+    # Parameters
+    accum_size = 16 * 1024
+
+    sc_size = 256 * 1024
+
+    # order = ('joo', 'ko', 'joi', 'io', 'ii', 'ji', 'ki')
+    order = ("joo", "joi", "ko", "io", "ii", "ji", "ki")  # zz gemm mapping
+    loads = (-1, 0, 0)  # joo guard for A
+    ii = (16, 16)
+    jj = (16, 4, 16)
+    kk = (32, 16)
+    workload_size = (N, M, K)
+    mapping = MatMulMapping(order, loads, ii, jj, kk, workload_size)
+    sch = GemminiScheduler(mapping)
+
+    gemmini = sch.multi_loop_tiling(gemmini)
+    print("after complete_tiling")
+    print(gemmini)
+    init_out_t = (ld_acc_i32_vector, ld_acc_i32_vector_v2)
+    gemmini = sch.replace_init_out(gemmini, accum_size, init_out_t, GEMM_ACCUM)
+    print("after replace_init_out")
+    print(gemmini)
+
+    gemmini = sch.apply_mapping_order(gemmini)
+    print("after apply_mapping_order")
+    print(gemmini)
+
+    a_instr_t = (ld_i8_block_id1, ld_i8_block_id1_v2)
+    b_instr_t = (ld_i8_block_id2, ld_i8_block_id2_v2)
+    gemmini = sch.replace_load_buffers(
+        gemmini, GEMM_SCRATCH, GEMM_SCRATCH, a_instr_t, b_instr_t, sc_size
+    )
+    print("after replace_load_buffers")
+    print(gemmini)
+
+    gemm_instr_t = (matmul_acc_i8, matmul_acc_i8_v2)
+    gemmini = sch.replace_gemm(gemmini, gemm_instr_t)
+    # print("after replace_gemm")
+    # print(gemmini)
+
+    store_instr_t = (st_acc_i8, st_acc_i8_v2)
+    gemmini = sch.replace_store(gemmini, store_instr_t)
+    # gemmini = add_unsafe_guard(gemmini, gemmini.find("do_ld_i8_block_id1(_)"), "joo == 0")
+    print("after replace_store")
+    print(gemmini)
+
+    gemmini = fuse_all_loops(gemmini, gemmini.body()[0])
+    gemmini = simplify(gemmini)
+    # Extra Optimizations
+    # print(gemmini)
+    # print(len(gemmini.find_loop("joo").body()))
+    # breakpoint()
+    # gemmini = sch.add_guards(gemmini)
+
+    print(gemmini)
+    print(gemmini.c_code_str())
+    # the problem is that the offset of A_temp and B_temp are not calculated correctly, as the stride of the last index
+    # is 1 always, this means that they consider the allocated spaces segmented [_, _, 16, 16] the last one has to be 16!
+    # you also can't make the last one 64 becasue then it conflicts with gemm pattern! So somehow you have to make the loads like
+    # 4, 16, 16!! you have to rewrite your approach for replace_load_buffers
+
+
+def generate_sample2_schedule():
+    K = 512
+    M = 512
+    N = 512
+    cpu = rename(
+        matmul_algorithm(), "matmul_on_cpu"
+    )  # Rename "matmul" to "matmul_on_cpu"
+    cpu = cpu.partial_eval(N=N, M=M, K=K)
+    # cpu = cpu.add_assertion("N % 256 == 0")
+    # cpu = cpu.add_assertion("M % 256 == 0")
+
+    # Rename the procedure to "matmul_on_gemmini"
+    gemmini = rename(cpu, "matmul_on_gemmini")
+
+    print("")
+    print("===== THIS IS THE ORIGINAL MATMUL ALGORITHM BEFORE SCHEDULING ====")
+    print(gemmini)
+    print("===== THIS IS THE ORIGINAL MATMUL ALGORITHM BEFORE SCHEDULING ====")
+    print("")
+
+    # Parameters
+    accum_size = 16 * 1024
+
+    sc_size = 256 * 1024
+
+    order = ("joo", "ioo", "joi", "ko", "ioi", "ii", "ji", "ki")  # zz2 gemm mapping
+    loads = (1, 1, -1)  # ioo guard for B
+    ii = (16, 2, 16)
+    jj = (4, 8, 16)
+    kk = (32, 16)
+    workload_size = (N, M, K)
+    mapping = MatMulMapping(order, loads, ii, jj, kk, workload_size)
+    sch = GemminiScheduler(mapping)
+
+    gemmini = sch.multi_loop_tiling(gemmini)
+    # print("after complete_tiling")
+    # print(gemmini)
+    init_out_t = (ld_acc_i32_vector, ld_acc_i32_vector_v2)
+    gemmini = sch.replace_init_out(gemmini, accum_size, init_out_t, GEMM_ACCUM)
+    # print("after replace_init_out")
+    # print(gemmini)
+
+    gemmini = sch.apply_mapping_order(gemmini)
+    print("after apply_mapping_order")
+    print(gemmini)
+
+    a_instr_t = (ld_i8_block_id1, ld_i8_block_id1_v2)
+    b_instr_t = (ld_i8_block_id2, ld_i8_block_id2_v2)
+    gemmini = sch.replace_load_buffers(
+        gemmini, GEMM_SCRATCH, GEMM_SCRATCH, a_instr_t, b_instr_t, sc_size
+    )
+    print("after replace_load_buffers")
+    print(gemmini)
+
+    gemm_instr_t = (matmul_acc_i8, matmul_acc_i8_v2)
+    gemmini = sch.replace_gemm(gemmini, gemm_instr_t)
+    # print("after replace_gemm")
+    # print(gemmini)
+
+    store_instr_t = (st_acc_i8, st_acc_i8_v2)
+    gemmini = sch.replace_store(gemmini, store_instr_t)
+
+    gemmini = fuse_all_loops(gemmini, gemmini.body()[0])
+    gemmini = simplify(gemmini)
+    # Extra Optimizations
+    # gemmini = sch.add_guards(gemmini)
+
+    print(gemmini)
+    print(gemmini.c_code_str())
+
+
+def generate_sample1_schedule():
+    K = 512
+    M = 256
+    N = 1024
+    cpu = rename(
+        matmul_algorithm(), "matmul_on_cpu"
+    )  # Rename "matmul" to "matmul_on_cpu"
+    cpu = cpu.partial_eval(N=N, M=M, K=K)
+    # cpu = cpu.add_assertion("N % 256 == 0")
+    # cpu = cpu.add_assertion("M % 256 == 0")
+
+    # Rename the procedure to "matmul_on_gemmini"
+    gemmini = rename(cpu, "matmul_on_gemmini")
+
+    print("")
+    print("===== THIS IS THE ORIGINAL MATMUL ALGORITHM BEFORE SCHEDULING ====")
+    print(gemmini)
+    print("===== THIS IS THE ORIGINAL MATMUL ALGORITHM BEFORE SCHEDULING ====")
+    print("")
+
+    # Parameters
+    accum_size = 16 * 1024
+
+    sc_size = 256 * 1024
+
+    # order = ('ioo', 'ko', 'joo', 'ioi', 'ii', 'ji', 'ki')
+    order = ("ioo", "jo", "ko", "ioi", "ii", "ji", "ki")  # zigzag2 gemm mapping
+    loads = (0, -1, 0)  # ioo guard for B
+    ii = (16, 4, 16)
+    jj = (16, 16)
+    kk = (32, 16)
+    workload_size = (N, M, K)
+    mapping = MatMulMapping(order, loads, ii, jj, kk, workload_size)
+    sch = GemminiScheduler(mapping)
+
+    gemmini = sch.multi_loop_tiling(gemmini)
+    print("after complete_tiling")
+    print(gemmini)
+    init_out_t = (ld_acc_i32_vector, ld_acc_i32_vector_v2)
+    gemmini = sch.replace_init_out(gemmini, accum_size, init_out_t, GEMM_ACCUM)
+    print("after replace_init_out")
+    print(gemmini)
+
+    gemmini = sch.apply_mapping_order(gemmini)
+    # print("after apply_mapping_order")
+    # print(gemmini)
+
+    a_instr_t = (ld_i8_block_id1, ld_i8_block_id1_v2)
+    b_instr_t = (ld_i8_block_id2, ld_i8_block_id2_v2)
+    gemmini = sch.replace_load_buffers(
+        gemmini, GEMM_SCRATCH, GEMM_SCRATCH, a_instr_t, b_instr_t, sc_size
+    )
+    print("after replace_load_buffers")
+    print(gemmini)
+
+    gemm_instr_t = (matmul_acc_i8, matmul_acc_i8_v2)
+    gemmini = sch.replace_gemm(gemmini, gemm_instr_t)
+    # print("after replace_gemm")
+    # print(gemmini)
+
+    store_instr_t = (st_acc_i8, st_acc_i8_v2)
+    gemmini = sch.replace_store(gemmini, store_instr_t)
+    # gemmini = add_unsafe_guard(gemmini, gemmini.find("do_ld_i8_block_id2(_)"), "ioo == 0")
+    print("after replace_store")
+    print(gemmini)
+
+    gemmini = fuse_all_loops(gemmini, gemmini.body()[0])
+    gemmini = simplify(gemmini)
+    # Extra Optimizations
+    # gemmini = sch.add_guards(gemmini)
+
+    print(gemmini)
+    print(gemmini.c_code_str())
+
+
+# generate_sample1_schedule()
+# generate_sample2_schedule()
+# generate_sample3_schedule() # is the same as zigzag1
+
+
+def toycar_schedule_layerwise(N, M, K, order, loads, ii, jj, kk):
+    cpu = rename(
+        matmul_algorithm(), "matmul_on_cpu"
+    )  # Rename "matmul" to "matmul_on_cpu"
+    cpu = cpu.partial_eval(N=N, M=M, K=K)
+    # cpu = cpu.add_assertion("N % 256 == 0")
+    # cpu = cpu.add_assertion("M % 256 == 0")
+
+    # Rename the procedure to "matmul_on_gemmini"
+    gemmini = rename(cpu, "matmul_on_gemmini")
+
+    print("")
+    print("===== THIS IS THE ORIGINAL MATMUL ALGORITHM BEFORE SCHEDULING ====")
+    print(gemmini)
+    print("===== THIS IS THE ORIGINAL MATMUL ALGORITHM BEFORE SCHEDULING ====")
+    print("")
+
+    # Parameters
+    accum_size = 16 * 1024
+
+    sc_size = 256 * 1024
+
+    # order = ('ioo', 'ko', 'joo', 'ioi', 'ii', 'ji', 'ki')
+    # order = ('ioo', 'joo', 'ko', 'ioi', 'ii', 'ji', 'ki') # zigzag2 gemm mapping
+    # loads = (0, -1, 0) #ioo guard for B
+    # ii = (16, 4, 16)
+    # jj = (16, 16)
+    # kk = (32, 16)
+    workload_size = (N, M, K)
+    mapping = MatMulMapping(order, loads, ii, jj, kk, workload_size)
+    sch = GemminiScheduler(mapping)
+
+    gemmini = sch.multi_loop_tiling(gemmini)
+    print("after complete_tiling")
+    print(gemmini)
+    init_out_t = (ld_acc_i32_vector, ld_acc_i32_vector_v2)
+    gemmini = sch.replace_init_out(gemmini, accum_size, init_out_t, GEMM_ACCUM)
+    print("after replace_init_out")
+    print(gemmini)
+
+    gemmini = sch.apply_mapping_order(gemmini)
+    # print("after apply_mapping_order")
+    # print(gemmini)
+
+    a_instr_t = (ld_i8_block_id1, ld_i8_block_id1_v2)
+    b_instr_t = (ld_i8_block_id2, ld_i8_block_id2_v2)
+    gemmini = sch.replace_load_buffers(
+        gemmini, GEMM_SCRATCH, GEMM_SCRATCH, a_instr_t, b_instr_t, sc_size
+    )
+    print("after replace_load_buffers")
+    print(gemmini)
+
+    gemm_instr_t = (matmul_acc_i8, matmul_acc_i8_v2)
+    gemmini = sch.replace_gemm(gemmini, gemm_instr_t)
+    # print("after replace_gemm")
+    # print(gemmini)
+
+    store_instr_t = (st_acc_i8, st_acc_i8_v2)
+    gemmini = sch.replace_store(gemmini, store_instr_t)
+    # gemmini = add_unsafe_guard(gemmini, gemmini.find("do_ld_i8_block_id2(_)"), "ioo == 0")
+    print("after replace_store")
+    print(gemmini)
+    gemmini = fuse_all_loops(gemmini, gemmini.body()[0])
+    gemmini = simplify(gemmini)
+    # gemmini = sch.add_guards(gemmini)
+
+    print(gemmini)
+    print(gemmini.c_code_str())
+
+
+# Toycar layers mappings
+# layer 0
+print("LAYER 0")
+N = 16
+M = 128
+K = 640
+order = ("jo", "ko", "i", "ji", "ki")  # zigzag2 gemm mapping
+loads = (-1, -1, -1)
+ii = (16,)
+jj = (8, 16)
+kk = (40, 16)
+# toycar_schedule_layerwise(N, M, K, order, loads, ii, jj, kk)
+
+# layer 1,4
+print("LAYER 1,4")
+N = 16
+M = 128
+K = 128
+order = ("jo", "ko", "i", "ji", "ki")  # zigzag2 gemm mapping
+loads = (-1, -1, -1)
+ii = (16,)
+jj = (8, 16)
+kk = (8, 16)
+# toycar_schedule_layerwise(N, M, K, order, loads, ii, jj, kk)
+
+# layer 2
+print("LAYER 2")
+N = 16
+M = 32
+K = 128
+order = ("jo", "ko", "i", "ji", "ki")  # zigzag2 gemm mapping
+loads = (-1, -1, -1)
+ii = (16,)
+jj = (2, 16)
+kk = (8, 16)
+# toycar_schedule_layerwise(N, M, K, order, loads, ii, jj, kk)
+
+# layer 3
+print("LAYER 3")
+N = 16
+M = 128
+K = 32
+order = ("jo", "ko", "i", "ji", "ki")  # zigzag2 gemm mapping
+loads = (-1, -1, -1)
+ii = (16,)
+jj = (8, 16)
+kk = (2, 16)
+# toycar_schedule_layerwise(N, M, K, order, loads, ii, jj, kk)
+
+# layer 5
+print("LAYER 5")
+N = 16
+M = 640
+K = 128
+order = ("jo", "ko", "i", "ji", "ki")  # zigzag2 gemm mapping
+loads = (-1, -1, -1)
+ii = (16,)
+jj = (40, 16)
+kk = (8, 16)
+toycar_schedule_layerwise(N, M, K, order, loads, ii, jj, kk)
