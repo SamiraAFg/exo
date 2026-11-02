@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from exo import proc, instr, DRAM, config
+from exo.libs.memories import GEMM_SCRATCH_FLEX, GEMM_ACCUM_FLEX
 from exo.libs.memories import GEMM_SCRATCH, GEMM_ACCUM
 from exo.libs.externs import select, relu
 from exo.stdlib.scheduling import *
+from exo.core.LoopIR import T
 
 
 def lift_config(p, config_str):
@@ -381,7 +383,7 @@ def ld_i8_block(
     n: size,
     m: size,
     src: [i8][n, 16 * m] @ DRAM,
-    dst: [i8][m, n, 16] @ GEMM_SCRATCH,
+    dst: [i8][m, n, 16] @ GEMM_SCRATCH_FLEX,
 ):
     assert n <= 16
     assert m <= 4
@@ -395,7 +397,65 @@ def ld_i8_block(
                 dst[j, i, k] = src[i, 16 * j + k]
 
 
+_gemm_ld_i8_block_10 = (
+    "gemmini_extended3_config_ld({src}.strides[0]*1, "
+    + "1.0f, 0, 0);\n"
+    + "gemmini_extended_mvin( &{src_data}, "
+    + "((uint64_t) &{dst_data}), 10*{m}, {n} );"
+)
+
+
+@instr(_gemm_ld_i8_block_10)
+def ld_i8_block_10(
+    n: size,
+    m: size,
+    src: [i8][n, 10 * m] @ DRAM,
+    dst: [i8][m, n, 10] @ GEMM_SCRATCH_FLEX,
+):
+    assert n <= 16
+    assert m <= 4
+    assert stride(src, 1) == 1
+    assert stride(dst, 0) == 16
+    assert stride(dst, 1) == 1
+
+    for i in seq(0, n):
+        for j in seq(0, m):
+            for k in seq(0, 10):
+                dst[j, i, k] = src[i, 10 * j + k]
+
+
+@instr(_gemm_ld_i8_block)
+def ld_i8_block_stride2_in(
+    n: size,
+    m: size,
+    src: [i8][2 * n, 16 * m] @ DRAM,
+    dst: [i8][m, n, 16] @ GEMM_SCRATCH_FLEX,
+):
+    assert n <= 16
+    assert m <= 4
+    assert stride(src, 1) == 1
+    assert stride(dst, 0) == 16
+    assert stride(dst, 1) == 1
+
+    for i in seq(0, n):
+        for j in seq(0, m):
+            for k in seq(0, 16):
+                dst[j, i, k] = src[2 * i, 16 * j + k]
+
+
 def make_do_ld_i8_block(name, instr_str, p=ld_i8_block):
+    p = rename(p, name)
+    p = make_instr(p, instr_str)
+    return p
+
+
+def make_do_ld_i8_block_10(name, instr_str, p=ld_i8_block_10):
+    p = rename(p, name)
+    p = make_instr(p, instr_str)
+    return p
+
+
+def make_do_ld_i8_block_stride2_in(name, instr_str, p=ld_i8_block_stride2_in):
     p = rename(p, name)
     p = make_instr(p, instr_str)
     return p
@@ -407,8 +467,17 @@ _do_gemm_ld_i8_block_id1 = (
 _do_gemm_ld_i8_block_id2 = (
     "gemmini_extended_mvin3( &{src_data}, " + "((uint64_t) &{dst_data}), 16*{m}, {n} );"
 )
+_do_gemm_ld_i8_block_id2_10 = (
+    "gemmini_extended_mvin3( &{src_data}, " + "((uint64_t) &{dst_data}), 10*{m}, {n} );"
+)
 do_ld_i8_block_id1 = make_do_ld_i8_block("do_ld_i8_block_id1", _do_gemm_ld_i8_block_id1)
 do_ld_i8_block_id2 = make_do_ld_i8_block("do_ld_i8_block_id2", _do_gemm_ld_i8_block_id2)
+do_ld_i8_block_id2_10 = make_do_ld_i8_block_10(
+    "do_ld_i8_block_id2", _do_gemm_ld_i8_block_id2_10
+)
+do_ld_i8_block_id2_stride2_in = make_do_ld_i8_block_stride2_in(
+    "do_ld_i8_block_id2_stride2_in", _do_gemm_ld_i8_block_id2
+)
 
 
 _gemm_ld_i8_block_id1 = (
@@ -422,6 +491,12 @@ _gemm_ld_i8_block_id2 = (
     + "1.0f, 0, {n}, 2);\n"
     + "gemmini_extended_mvin3( &{src_data}, "
     + "((uint64_t) &{dst_data}), 16*{m}, {n} );"
+)
+_gemm_ld_i8_block_id2_10 = (
+    "gemmini_extended4_config_ld({src}.strides[0]*1, "
+    + "1.0f, 0, {n}, 2);\n"
+    + "gemmini_extended_mvin3( &{src_data}, "
+    + "((uint64_t) &{dst_data}), 10*{m}, {n} );"
 )
 
 
@@ -450,6 +525,61 @@ def make_ld_i8_block(name, ld_id, p=ld_i8_block, stride_val=None):
     return p
 
 
+def make_ld_i8_block_10(name, ld_id, p=ld_i8_block_10, stride_val=None):
+    if ld_id == 1:
+        ConfigLoad = ConfigLoad_id1
+        do_ld_i8_block = do_ld_i8_block_id1
+        config_ld_i8 = config_ld_i8_id1
+        write_stride = "ConfigLoad_id1.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id1
+    else:
+        assert ld_id == 2
+        ConfigLoad = ConfigLoad_id2
+        do_ld_i8_block = do_ld_i8_block_id2_10
+        config_ld_i8 = config_ld_i8_id2
+        write_stride = "ConfigLoad_id2.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id2_10
+
+    if stride_val:
+        p = write_config(p, p.body().before(), ConfigLoad, "src_stride", stride_val)
+        p = replace(p, "for i in _:_", do_ld_i8_block)
+        p = replace(p, write_stride, config_ld_i8)
+
+    p = rename(p, name)
+    p = make_instr(p, _gemm_ld_i8_block)
+    return p
+
+
+@instr("gemmini_extended3_config_ld({src_stride}*2, 1.0f, 0, 2);\n")
+def config_ld_i8_id2_stride2_in(src_stride: stride):
+    ConfigLoad_id2.src_stride = src_stride
+
+
+def make_ld_i8_block_stride2_in(name, ld_id, p=ld_i8_block_stride2_in, stride_val=None):
+    if ld_id == 1:
+        ConfigLoad = ConfigLoad_id1
+        do_ld_i8_block = do_ld_i8_block_id1
+        config_ld_i8 = config_ld_i8_id1
+        write_stride = "ConfigLoad_id1.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id1
+    else:
+        assert ld_id == 2
+        ConfigLoad = ConfigLoad_id2
+        do_ld_i8_block = do_ld_i8_block_id2_stride2_in
+        config_ld_i8 = config_ld_i8_id2_stride2_in
+        write_stride = "ConfigLoad_id2.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id2
+
+    if stride_val:
+        p = write_config(p, p.body().before(), ConfigLoad, "src_stride", stride_val)
+        p = replace(p, "for i in _:_", do_ld_i8_block)
+        p = replace(p, write_stride, config_ld_i8)
+
+    p = rename(p, name)
+    p = make_instr(p, _gemm_ld_i8_block)
+    return p
+
+
 ld_i8_block_id1 = make_ld_i8_block("ld_i8_block_id1", 1)
 ld_i8_block_id1_v2 = make_ld_i8_block(
     "ld_i8_block_id1_v2", 1, stride_val="stride(src,0)"
@@ -461,6 +591,16 @@ ld_i8_block_id1_s2_v2 = make_ld_i8_block(
 ld_i8_block_id2 = make_ld_i8_block("ld_i8_block_id2", 2)
 ld_i8_block_id2_v2 = make_ld_i8_block(
     "ld_i8_block_id2_v2", 2, stride_val="stride(src,0)"
+)
+ld_i8_block_id2_10 = make_ld_i8_block_10("ld_i8_block_id2_10", 2)
+ld_i8_block_id2_v2_10 = make_ld_i8_block_10(
+    "ld_i8_block_id2_v2_10", 2, stride_val="stride(src,0)"
+)
+ld_i8_block_id2_stride2_in = make_ld_i8_block_stride2_in(
+    "ld_i8_block_id2_stride2_in", 2
+)
+ld_i8_block_id2_v2_stride2_in = make_ld_i8_block_stride2_in(
+    "ld_i8_block_id2_v2_stride2_in", 2, stride_val="stride(src,0)"
 )
 ld_i8_block_id2_s2_v2 = make_ld_i8_block(
     "ld_i8_block_id2_s2_v2", 2, stride_val="stride(src,0)"
@@ -734,7 +874,7 @@ def ld_acc_i32_vector(
     n: size,
     m: size,  # added dynamic size
     src: [i32][1, m] @ DRAM,
-    dst: [i32][n, m] @ GEMM_ACCUM,
+    dst: [i32][n, m] @ GEMM_ACCUM_FLEX,
 ):
     assert n <= 16
     assert m <= 16  # added dynamic size
@@ -754,7 +894,7 @@ def do_ld_acc_i32_vector(
     n: size,
     m: size,  # added dynamic size
     src: [i32][1, 16] @ DRAM,
-    dst: [i32][n, 16] @ GEMM_ACCUM,
+    dst: [i32][n, 16] @ GEMM_ACCUM_FLEX,
 ):
     assert n <= 16
     assert m <= 16  # added dynamic size
@@ -835,7 +975,7 @@ def st_acc_i8(
     m: size,
     scale: f32,
     act: bool,
-    src: [i32][n, 16] @ GEMM_ACCUM,
+    src: [i32][n, 16] @ GEMM_ACCUM_FLEX,
     dst: [i8][n, m] @ DRAM,
 ):
     assert n <= 16
@@ -874,7 +1014,7 @@ _gemm_st_acc_i8 = "gemmini_extended_mvout( ((uint64_t) &{dst_data}), (uint32_t) 
 
 @instr(_gemm_st_acc_i8)
 def do_st_acc_i8(
-    n: size, m: size, src: [i32][n, 16] @ GEMM_ACCUM, dst: [i8][n, m] @ DRAM
+    n: size, m: size, src: [i32][n, 16] @ GEMM_ACCUM_FLEX, dst: [i8][n, m] @ DRAM
 ):
     assert n <= 16
     assert m <= 16
@@ -1250,9 +1390,9 @@ def matmul_acc_i8(
     N: size,
     M: size,
     K: size,
-    A: [i8][N, 16] @ GEMM_SCRATCH,
-    B: [i8][K, 16] @ GEMM_SCRATCH,
-    C: [i32][N, 16] @ GEMM_ACCUM,
+    A: [i8][N, 16] @ GEMM_SCRATCH_FLEX,
+    B: [i8][K, 16] @ GEMM_SCRATCH_FLEX,
+    C: [i32][N, 16] @ GEMM_ACCUM_FLEX,
 ):
     assert N <= 16
     assert M <= 16
@@ -1276,9 +1416,9 @@ def do_matmul_acc_i8(
     N: size,
     M: size,
     K: size,
-    A: [i8][N, 16] @ GEMM_SCRATCH,
-    B: [i8][K, 16] @ GEMM_SCRATCH,
-    C: [i32][N, 16] @ GEMM_ACCUM,
+    A: [i8][N, 16] @ GEMM_SCRATCH_FLEX,
+    B: [i8][K, 16] @ GEMM_SCRATCH_FLEX,
+    C: [i32][N, 16] @ GEMM_ACCUM_FLEX,
 ):
     assert N <= 16
     assert M <= 16
@@ -1313,60 +1453,446 @@ matmul_acc_i8 = delete_pass(matmul_acc_i8)
 matmul_acc_i8 = make_instr(matmul_acc_i8, _gemm_config_matmul + _gemm_matmul_acc)
 
 # --------------------------------------------------------------------------- #
-#
+
 # --------------------------------------------------------------------------- #
-# --- new patterns ---
-# _gemm_ld_i8_block_new = (
+# --- new patterns for ocol x 1 @ 1xp p = 1
+
+# mvin input different from the weight
+# _gemm_config_ld_dw_in = "gemmini_extended3_config_ld({src}.strides[0]*1, 1.0f, 0, 2);\n"
+
+# @instr(_gemm_config_ld_dw_in)
+# def config_ld_dw_in(stride_set: bool):
+#     ConfigLoadAcc.stride_set = stride_set
+
+# _dw_ld_i8_in = (
 #     "gemmini_extended3_config_ld({src}.strides[0]*1, "
-#     + "1.0f, 0, 0);\n"
+#     + "1.0f, 0, 2);\n"
 #     + "gemmini_extended_mvin( &{src_data}, "
-#     + "((uint64_t) &{dst_data}), {m}, {n} );"
+#     + "((uint64_t) &{dst_data}), 1, {n} );"
 # )
 
-
-# @instr(_gemm_ld_i8_block_new)
-# def ld_i8_block_new(
+# @instr(_dw_ld_i8_in)
+# def ld_i8_dw_in(
 #     n: size,
-#     m: size,
-#     src: [i8][n, m] @ DRAM,
-#     dst: [i8][n, m] @ GEMM_SCRATCH,
+#     # m: size,
+#     src: [i8][2*n] @ DRAM,
+#     dst: [i8][n] @ GEMM_SCRATCH_FLEX,
 # ):
 #     assert n <= 16
-#     assert m <= 64
-#     assert stride(src, 1) == 1
-#     assert stride(dst, 0) == 16
-#     assert stride(dst, 1) == 1
+#     # assert m <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
 
 #     for i in seq(0, n):
-#         for j in seq(0, m):
-#             dst[i, j] = src[i, j]
+#         dst[i] = src[i*2]
 
 
-# def make_do_ld_i8_block_new(name, instr_str, p=ld_i8_block_new):
+# _do_dw_ld_i8_in = "gemmini_extended_mvin3( &{src_data}, ((uint64_t) &{dst_data}), 1, {n});"
+# @instr(_do_dw_ld_i8_in)
+# def do_ld_i8_dw_in(
+#     n: size,
+#     # m: size,
+#     src: [i8][2*n] @ DRAM,
+#     dst: [i8][n] @ GEMM_SCRATCH_FLEX,
+# ):
+#     assert n <= 16
+#     # assert m <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+
+#     for i in seq(0, n):
+#         dst[i] = src[i*2]
+
+
+# def make_ld_i8_dw_in(name, p=ld_i8_dw_in):
 #     p = rename(p, name)
-#     p = make_instr(p, instr_str)
+#     p = write_config(p, p.body().before(), ConfigLoadAcc, "stride_set", "True")
+#     # p = p.configwrite_after('pass', ConfigLoadAcc, 'stride_set', 'True')
+#     p = replace(p, "for i in _:_", do_ld_i8_dw_in)
+#     p = replace(p, "ConfigLoadAcc.stride_set = _", config_ld_dw_in)
+#     p = make_instr(p, _dw_ld_i8_in)
+#     # print(p)
 #     return p
 
 
-# _do_gemm_ld_i8_block_id2_new = (
-#     "gemmini_extended_mvin3( &{src_data}, " + "((uint64_t) &{dst_data}), {m}, {n} );"
+# ld_i8_dw_in_v2 = make_ld_i8_dw_in("ld_i8_dw_in_v2")
+
+# --------------
+
+_gemm_ld_i8_block_new2 = (
+    "gemmini_extended3_config_ld({src}.strides[0]*1, "
+    + "1.0f, 0, 0);\n"
+    + "gemmini_extended_mvin( &{src_data}, "
+    + "((uint64_t) &{dst_data}), 1, {n} );"
+)
+
+
+@instr(_gemm_ld_i8_block_new2)
+def ld_i8_block_dw_in(
+    n: size,
+    # m: size,
+    src: [i8][2 * n] @ DRAM,
+    dst: [i8][n] @ GEMM_SCRATCH_FLEX,
+):
+    assert n <= 16
+    # assert m <= 16
+    # assert stride(src, 0) == 1
+    # assert stride(dst, 0) == 1
+    # assert stride(dst, 1) == 1
+
+    for i in seq(0, n):
+        dst[i] = src[2 * i]
+
+
+@instr(_gemm_ld_i8_block_new2)
+def ld_i8_block_new2(
+    n: size,
+    # m: size,
+    src: [i8][n] @ DRAM,
+    dst: [i8][n] @ GEMM_SCRATCH_FLEX,
+):
+    assert n <= 16
+    # assert m <= 16
+    # assert stride(src, 0) == 1
+    # assert stride(dst, 0) == 1
+    # assert stride(dst, 1) == 1
+
+    for i in seq(0, n):
+        dst[i] = src[i]
+
+
+def make_do_ld_i8_block_new2(name, instr_str, p=ld_i8_block_new2):
+    p = rename(p, name)
+    p = make_instr(p, instr_str)
+    # print("____"*30)
+    # print(p)
+    return p
+
+
+def make_do_ld_i8_block_dw_in(name, instr_str, p=ld_i8_block_dw_in):
+    p = rename(p, name)
+    p = make_instr(p, instr_str)
+    # print("____"*30)
+    # print(p)
+    return p
+
+
+_do_gemm_ld_i8_block_id2_new2 = (
+    "gemmini_extended_mvin3( &{src_data}, " + "((uint64_t) &{dst_data}), 1, {n} );"
+)
+_do_gemm_ld_i8_block_id1_new2 = (
+    "gemmini_extended_mvin2( &{src_data}, " + "((uint64_t) &{dst_data}), 1, {n} );"
+)
+do_ld_i8_block_id2_new2 = make_do_ld_i8_block_new2(
+    "do_ld_i8_block_id2_new2", _do_gemm_ld_i8_block_id2_new2
+)
+do_ld_i8_block_id2_dw_in = make_do_ld_i8_block_dw_in(
+    "do_ld_i8_block_id2_dw_in", _do_gemm_ld_i8_block_id2_new2
+)
+do_ld_i8_block_id1_new2 = make_do_ld_i8_block_new2(
+    "do_ld_i8_block_id1_new2", _do_gemm_ld_i8_block_id1_new2
+)
+
+_gemm_ld_i8_block_id2_new2 = (
+    "gemmini_extended4_config_ld({src}.strides[0]*1, "
+    + "1.0f, 0, {n}, 2);\n"
+    + "gemmini_extended_mvin3( &{src_data}, "
+    + "((uint64_t) &{dst_data}), 1, {n} );"
+)
+_gemm_ld_i8_block_id1_new2 = (
+    "gemmini_extended3_config_ld({src}.strides[0]*1, "
+    + "1.0f, 0, 1);\n"
+    + "gemmini_extended_mvin2( &{src_data}, "
+    + "((uint64_t) &{dst_data}), 1, {n} );"
+)
+
+
+def make_ld_i8_block_new2(name, ld_id, p=ld_i8_block_new2, stride_val=None):
+    if ld_id == 1:
+        ConfigLoad = ConfigLoad_id1
+        do_ld_i8_block = do_ld_i8_block_id1_new2
+        config_ld_i8 = config_ld_i8_id1
+        write_stride = "ConfigLoad_id1.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id1_new2
+    else:
+        ConfigLoad = ConfigLoad_id2
+        do_ld_i8_block = do_ld_i8_block_id2_new2
+        config_ld_i8 = config_ld_i8_id2
+        write_stride = "ConfigLoad_id2.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id2_new2
+
+    if stride_val:
+        p = write_config(p, p.body().before(), ConfigLoad, "src_stride", stride_val)
+        p = replace(p, "for i in _:_", do_ld_i8_block)
+        p = replace(p, write_stride, config_ld_i8)
+
+    p = rename(p, name)
+    p = make_instr(p, _gemm_ld_i8_block)
+    return p
+
+
+@instr("gemmini_extended3_config_ld({src_stride}*2, 1.0f, 0, 2);\n")
+def config_ld_i8_id2_dw_in(src_stride: stride):
+    ConfigLoad_id2.src_stride = src_stride
+
+
+def make_ld_i8_block_dw_in(name, ld_id, p=ld_i8_block_dw_in, stride_val=None):
+    if ld_id == 1:
+        ConfigLoad = ConfigLoad_id1
+        do_ld_i8_block = do_ld_i8_block_id1_new2
+        config_ld_i8 = config_ld_i8_id1
+        write_stride = "ConfigLoad_id1.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id1_new2
+    else:
+        ConfigLoad = ConfigLoad_id2
+        do_ld_i8_block = do_ld_i8_block_id2_dw_in
+        config_ld_i8 = config_ld_i8_id2_dw_in
+        write_stride = "ConfigLoad_id2.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id2_new2
+
+    if stride_val:
+        p = write_config(p, p.body().before(), ConfigLoad, "src_stride", stride_val)
+        p = replace(p, "for i in _:_", do_ld_i8_block)
+        p = replace(p, write_stride, config_ld_i8)
+
+    p = rename(p, name)
+    p = make_instr(p, _gemm_ld_i8_block)
+    return p
+
+
+ld_i8_block_id2_new2 = make_ld_i8_block_new2("ld_i8_block_id2_new2", 2)
+ld_i8_block_id2_v2_new2 = make_ld_i8_block_new2(
+    "ld_i8_block_id2_v2_new2", 2, stride_val="stride(src,0)"
+)
+ld_i8_block_id2_dw_in = make_ld_i8_block_dw_in("ld_i8_block_id2_dw_in", 2)
+ld_i8_block_id2_v2_dw_in = make_ld_i8_block_dw_in(
+    "ld_i8_block_id2_v2_dw_in", 2, stride_val="stride(src,0)"
+)
+
+ld_i8_block_id1_new2 = make_ld_i8_block_new2("ld_i8_block_id1_new2", 1)
+ld_i8_block_id1_v2_new2 = make_ld_i8_block_new2(
+    "ld_i8_block_id1_v2_new2", 1, stride_val="stride(src,0)"
+)
+
+# ------------- Gemm pattern
+_gemm_matmul_acc_new2 = (
+    "gemmini_extended_preload("
+    + "(uint32_t)(&{B_data}), (uint32_t)(&{C_data}) | 0x40000000, "
+    + "1, 1, "
+    + "1, {N}"  # changed {m} to 1
+    + ");\n"
+    + "gemmini_extended_compute_preloaded("
+    + "(uint32_t)(&{A_data}), ~((uint32_t)0), "
+    + "1, {N}, "
+    + "16, 16"
+    + ");"
+)
+
+
+@instr(_gemm_matmul_acc_new2)
+def matmul_acc_i8_new2(
+    N: size,
+    # M: size,
+    # K: size,
+    A: [i8][N] @ GEMM_SCRATCH_FLEX,
+    B: [i8][1] @ GEMM_SCRATCH_FLEX,
+    C: [i32][N] @ GEMM_ACCUM_FLEX,
+):
+    assert N <= 16
+    # assert M <= 16
+    # assert K <= 16
+
+    pass
+    for i in seq(0, N):
+        for j in seq(0, 1):
+            a: i32
+            b: i32
+            a = A[i]
+            b = B[j]
+            C[i] += a * b
+
+
+@instr(_gemm_matmul_acc_new2)
+def do_matmul_acc_i8_new2(
+    N: size,
+    # M: size,
+    # K: size,
+    A: [i8][N] @ GEMM_SCRATCH_FLEX,
+    B: [i8][1] @ GEMM_SCRATCH_FLEX,
+    C: [i32][N] @ GEMM_ACCUM_FLEX,
+):
+    assert N <= 16
+    # assert M <= 16
+    # assert K <= 16
+
+    for i in seq(0, N):
+        for j in seq(0, 1):
+            a: i32
+            b: i32
+            a = A[i]
+            b = B[j]
+            C[i] += a * b
+
+
+def make_matmul_acc_i8_v2_new2(p=matmul_acc_i8_new2):
+    p = rename(p, "matmul_acc_i8_v2_new2")
+    p = write_config(p, p.body().before(), ConfigMatmul, "done", "True")
+    # p = p.configwrite_after('pass', ConfigMatmul, 'done', 'True')
+    p = replace(p, "for i in _:_", do_matmul_acc_i8_new2)
+    p = replace(p, "ConfigMatmul.done = True", config_matmul)
+    p = delete_pass(p)
+    p = make_instr(p, _gemm_matmul_acc_new2)
+    return p
+
+
+matmul_acc_i8_v2_new2 = make_matmul_acc_i8_v2_new2()
+
+matmul_acc_i8_new2 = delete_pass(matmul_acc_i8_new2)
+matmul_acc_i8_new2 = make_instr(
+    matmul_acc_i8_new2, _gemm_config_matmul + _gemm_matmul_acc
+)
+
+# =======================================================
+# gemm load for ocol x kcol @ kcol x p
+# _gemm_matmul_acc_new3 = (
+#     "gemmini_extended_preload("
+#     + "(uint32_t)(&{B_data}), (uint32_t)(&{C_data}) | 0x40000000, "
+#     + "1, {K}, "
+#     + "1, {N}"
+#     + ");\n"
+#     + "gemmini_extended_compute_preloaded("
+#     + "(uint32_t)(&{A_data}), ~((uint32_t)0), "
+#     + "{K}, {N}, "
+#     + "16, 16"
+#     + ");"
 # )
+
+
+# @instr(_gemm_matmul_acc_new3)
+# def matmul_acc_i8_new3(
+#     N: size,
+#     # M: size,
+#     K: size,
+#     A: [i8][N, K] @ GEMM_SCRATCH_FLEX,
+#     B: [i8][K, 1] @ GEMM_SCRATCH_FLEX,
+#     C: [i32][N] @ GEMM_ACCUM_FLEX,
+# ):
+#     assert N <= 16
+#     # assert M <= 16
+#     assert K <= 16
+
+#     pass
+#     for i in seq(0, N):
+#         for j in seq(0, 1):
+#             for k in seq(0, K):
+#                 a: i32
+#                 b: i32
+
+#                 a = A[i, k]
+#                 b = B[k, j]
+
+#                 C[i] += a * b
+
+
+# @instr(_gemm_matmul_acc_new3)
+# def do_matmul_acc_i8_new3(
+#     N: size,
+#     # M: size,
+#     K: size,
+#     A: [i8][N, K] @ GEMM_SCRATCH_FLEX,
+#     B: [i8][K, 1] @ GEMM_SCRATCH_FLEX,
+#     C: [i32][N] @ GEMM_ACCUM_FLEX,
+# ):
+#     assert N <= 16
+#     # assert M <= 16
+#     assert K <= 16
+
+#     for i in seq(0, N):
+#         for j in seq(0, 1):
+#             for k in seq(0, K):
+#                 a: i32
+#                 b: i32
+
+#                 a = A[i, k]
+#                 b = B[k, j]
+
+#                 C[i] += a * b
+
+
+# def make_matmul_acc_i8_v2_new3(p=matmul_acc_i8_new3):
+#     p = rename(p, "matmul_acc_i8_v2_new3")
+#     p = write_config(p, p.body().before(), ConfigMatmul, "done", "True")
+#     # p = p.configwrite_after('pass', ConfigMatmul, 'done', 'True')
+#     p = replace(p, "for i in _:_", do_matmul_acc_i8_new3)
+#     p = replace(p, "ConfigMatmul.done = True", config_matmul)
+#     p = delete_pass(p)
+#     p = make_instr(p, _gemm_matmul_acc_new3)
+#     return p
+
+
+# matmul_acc_i8_v2_new3 = make_matmul_acc_i8_v2_new3()
+
+# matmul_acc_i8_new3 = delete_pass(matmul_acc_i8_new3)
+# matmul_acc_i8_new3 = make_instr(matmul_acc_i8_new3, _gemm_config_matmul + _gemm_matmul_acc)
+
+# --------------------------------------------
+# inp load for ocol x kcol @ kcol x p --> changed for moving every column of input as a col
+_gemm_ld_i8_block_new3 = (
+    "gemmini_extended3_config_ld({src}.strides[0]*1, "
+    + "1.0f, 0, 0);\n"
+    + "gemmini_extended_mvin( &{src_data}, "
+    + "((uint64_t) &{dst_data}), 1, {n} + {m} - 1);"
+)
+
+
+@instr(_gemm_ld_i8_block_new3)
+def ld_i8_block_new3(
+    n: size,
+    m: size,
+    src: [i8][n + m - 1] @ DRAM,
+    dst: [i8][n, m] @ GEMM_SCRATCH_FLEX,
+):
+    assert n <= 16
+    assert m <= 16
+    # assert stride(src, 0) == 1
+    # assert stride(dst, 0) == 1
+    # assert stride(dst, 1) == 1
+
+    for i in seq(0, n):
+        for j in seq(0, m):
+            dst[i, j] = src[i + j]
+
+
+def make_do_ld_i8_block_new3(name, instr_str, p=ld_i8_block_new3):
+    p = rename(p, name)
+    p = make_instr(p, instr_str)
+    # print("____"*30)
+    # print(p)
+    return p
+
+
+_do_gemm_ld_i8_block_id2_new3 = (
+    "gemmini_extended_mvin3( &{src_data}, "
+    + "((uint64_t) &{dst_data}), 1, {n} + {m} - 1 );"
+)
 # _do_gemm_ld_i8_block_id1_new = (
 #     "gemmini_extended_mvin2( &{src_data}, " + "((uint64_t) &{dst_data}), {m}, {n} );"
 # )
-# do_ld_i8_block_id2_new = make_do_ld_i8_block_new(
-#     "do_ld_i8_block_id2_new", _do_gemm_ld_i8_block_id2_new
-# )
+do_ld_i8_block_id2_new3 = make_do_ld_i8_block_new3(
+    "do_ld_i8_block_id2_new3", _do_gemm_ld_i8_block_id2_new3
+)
 # do_ld_i8_block_id1_new = make_do_ld_i8_block_new(
 #     "do_ld_i8_block_id1_new", _do_gemm_ld_i8_block_id1_new
 # )
 
-# _gemm_ld_i8_block_id2_new = (
-#     "gemmini_extended4_config_ld({src}.strides[0]*1, "
-#     + "1.0f, 0, {n}, 2);\n"
-#     + "gemmini_extended_mvin3( &{src_data}, "
-#     + "((uint64_t) &{dst_data}), {m}, {n} );"
-# )
+_gemm_ld_i8_block_id2_new3 = (
+    "gemmini_extended4_config_ld({src}.strides[0]*1, "
+    + "1.0f, 0, {n}, 2);\n"
+    + "gemmini_extended_mvin3( &{src_data}, "
+    + "((uint64_t) &{dst_data}), 1, {n} + {m} - 1 );"
+)
 # _gemm_ld_i8_block_id1_new = (
 #     "gemmini_extended3_config_ld({src}.strides[0]*1, "
 #     + "1.0f, 0, 1);\n"
@@ -1375,40 +1901,909 @@ matmul_acc_i8 = make_instr(matmul_acc_i8, _gemm_config_matmul + _gemm_matmul_acc
 # )
 
 
-# def make_ld_i8_block_new(name, ld_id, p=ld_i8_block_new, stride_val=None):
-#     if ld_id == 1:
-#         ConfigLoad = ConfigLoad_id1
-#         do_ld_i8_block = do_ld_i8_block_id1_new
-#         config_ld_i8 = config_ld_i8_id1
-#         write_stride = "ConfigLoad_id1.src_stride = _"
-#         _gemm_ld_i8_block = _gemm_ld_i8_block_id1_new
-#     else:
-#         ConfigLoad = ConfigLoad_id2
-#         do_ld_i8_block = do_ld_i8_block_id2_new
-#         config_ld_i8 = config_ld_i8_id2
-#         write_stride = "ConfigLoad_id2.src_stride = _"
-#         _gemm_ld_i8_block = _gemm_ld_i8_block_id2_new
+def make_ld_i8_block_new3(name, ld_id, p=ld_i8_block_new3, stride_val=None):
+    if ld_id == 1:
+        ConfigLoad = ConfigLoad_id1
+        do_ld_i8_block = do_ld_i8_block_id1_new
+        config_ld_i8 = config_ld_i8_id1
+        write_stride = "ConfigLoad_id1.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id1_new
+    else:
+        ConfigLoad = ConfigLoad_id2
+        do_ld_i8_block = do_ld_i8_block_id2_new3
+        config_ld_i8 = config_ld_i8_id2
+        write_stride = "ConfigLoad_id2.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id2_new3
 
-#     if stride_val:
-#         p = write_config(p, p.body().before(), ConfigLoad, "src_stride", stride_val)
-#         p = replace(p, "for i in _:_", do_ld_i8_block)
-#         p = replace(p, write_stride, config_ld_i8)
+    if stride_val:
+        p = write_config(p, p.body().before(), ConfigLoad, "src_stride", stride_val)
+        p = replace(p, "for i in _:_", do_ld_i8_block)
+        p = replace(p, write_stride, config_ld_i8)
 
+    p = rename(p, name)
+    p = make_instr(p, _gemm_ld_i8_block)
+    return p
+
+
+ld_i8_block_id2_new3 = make_ld_i8_block_new3("ld_i8_block_id2_new3", 2)
+ld_i8_block_id2_v2_new3 = make_ld_i8_block_new3(
+    "ld_i8_block_id2_v2_new3", 2, stride_val="stride(src,0)"
+)
+
+
+# =============================================================================
+# --- new patterns --- for ocol x chi @ chi x och
+_gemm_ld_i8_block_new = (
+    "gemmini_extended3_config_ld({src}.strides[0]*1, "
+    + "1.0f, 0, 0);\n"
+    + "gemmini_extended_mvin( &{src_data}, "
+    + "((uint64_t) &{dst_data}), {m}, {n} );"
+)
+
+
+@instr(_gemm_ld_i8_block_new)
+def ld_i8_block_new(
+    n: size,
+    m: size,
+    src: [i8][n, m] @ DRAM,
+    dst: [i8][n, m] @ GEMM_SCRATCH_FLEX,
+):
+    assert n <= 16
+    assert m <= 16
+    # assert stride(src, 0) == 1
+    # assert stride(dst, 0) == 1
+    # assert stride(dst, 1) == 1
+
+    for i in seq(0, n):
+        for j in seq(0, m):
+            dst[i, j] = src[i, j]
+
+
+@instr(_gemm_ld_i8_block_new)
+def ld_i8_block_new_stride2_in(
+    n: size,
+    m: size,
+    src: [i8][2 * n, m] @ DRAM,
+    dst: [i8][n, m] @ GEMM_SCRATCH_FLEX,
+):
+    assert n <= 16
+    assert m <= 16
+    # assert stride(src, 0) == 1
+    # assert stride(dst, 0) == 1
+    # assert stride(dst, 1) == 1
+
+    for i in seq(0, n):
+        for j in seq(0, m):
+            dst[i, j] = src[i * 2, j]
+
+
+def make_do_ld_i8_block_new(name, instr_str, p=ld_i8_block_new):
+    p = rename(p, name)
+    p = make_instr(p, instr_str)
+    # print("____"*30)
+    # print(p)
+    return p
+
+
+def make_do_ld_i8_block_new_stride2_in(name, instr_str, p=ld_i8_block_new_stride2_in):
+    p = rename(p, name)
+    p = make_instr(p, instr_str)
+    # print("____"*30)
+    # print(p)
+    return p
+
+
+_do_gemm_ld_i8_block_id2_new = (
+    "gemmini_extended_mvin3( &{src_data}, " + "((uint64_t) &{dst_data}), {m}, {n} );"
+)
+_do_gemm_ld_i8_block_id1_new = (
+    "gemmini_extended_mvin2( &{src_data}, " + "((uint64_t) &{dst_data}), {m}, {n} );"
+)
+do_ld_i8_block_id2_new = make_do_ld_i8_block_new(
+    "do_ld_i8_block_id2_new", _do_gemm_ld_i8_block_id2_new
+)
+do_ld_i8_block_id2_new_stride2_in = make_do_ld_i8_block_new_stride2_in(
+    "do_ld_i8_block_id2_new_stride2_in", _do_gemm_ld_i8_block_id2_new
+)
+do_ld_i8_block_id1_new = make_do_ld_i8_block_new(
+    "do_ld_i8_block_id1_new", _do_gemm_ld_i8_block_id1_new
+)
+
+_gemm_ld_i8_block_id2_new = (
+    "gemmini_extended4_config_ld({src}.strides[0]*1, "
+    + "1.0f, 0, {n}, 2);\n"
+    + "gemmini_extended_mvin3( &{src_data}, "
+    + "((uint64_t) &{dst_data}), {m}, {n} );"
+)
+_gemm_ld_i8_block_id1_new = (
+    "gemmini_extended3_config_ld({src}.strides[0]*1, "
+    + "1.0f, 0, 1);\n"
+    + "gemmini_extended_mvin2( &{src_data}, "
+    + "((uint64_t) &{dst_data}), {m}, {n} );"
+)
+
+
+def make_ld_i8_block_new(name, ld_id, p=ld_i8_block_new, stride_val=None):
+    if ld_id == 1:
+        ConfigLoad = ConfigLoad_id1
+        do_ld_i8_block = do_ld_i8_block_id1_new
+        config_ld_i8 = config_ld_i8_id1
+        write_stride = "ConfigLoad_id1.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id1_new
+    else:
+        ConfigLoad = ConfigLoad_id2
+        do_ld_i8_block = do_ld_i8_block_id2_new
+        config_ld_i8 = config_ld_i8_id2
+        write_stride = "ConfigLoad_id2.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id2_new
+
+    if stride_val:
+        p = write_config(p, p.body().before(), ConfigLoad, "src_stride", stride_val)
+        p = replace(p, "for i in _:_", do_ld_i8_block)
+        p = replace(p, write_stride, config_ld_i8)
+
+    p = rename(p, name)
+    p = make_instr(p, _gemm_ld_i8_block)
+    return p
+
+
+@instr("gemmini_extended3_config_ld({src_stride}*2, 1.0f, 0, 2);\n")
+def config_ld_i8_id2_new_stride2_in(src_stride: stride):
+    ConfigLoad_id2.src_stride = src_stride
+
+
+def make_ld_i8_block_new_stride2_in(
+    name, ld_id, p=ld_i8_block_new_stride2_in, stride_val=None
+):
+    if ld_id == 1:
+        ConfigLoad = ConfigLoad_id1
+        do_ld_i8_block = do_ld_i8_block_id1_new
+        config_ld_i8 = config_ld_i8_id1
+        write_stride = "ConfigLoad_id1.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id1_new
+    else:
+        ConfigLoad = ConfigLoad_id2
+        do_ld_i8_block = do_ld_i8_block_id2_new_stride2_in
+        config_ld_i8 = config_ld_i8_id2_new_stride2_in
+        write_stride = "ConfigLoad_id2.src_stride = _"
+        _gemm_ld_i8_block = _gemm_ld_i8_block_id2_new
+
+    if stride_val:
+        p = write_config(p, p.body().before(), ConfigLoad, "src_stride", stride_val)
+        p = replace(p, "for i in _:_", do_ld_i8_block)
+        p = replace(p, write_stride, config_ld_i8)
+
+    p = rename(p, name)
+    p = make_instr(p, _gemm_ld_i8_block)
+    return p
+
+
+ld_i8_block_id2_new = make_ld_i8_block_new("ld_i8_block_id2_new", 2)
+ld_i8_block_id2_v2_new = make_ld_i8_block_new(
+    "ld_i8_block_id2_v2_new", 2, stride_val="stride(src,0)"
+)
+ld_i8_block_id2_new_stride2_in = make_ld_i8_block_new_stride2_in(
+    "ld_i8_block_id2_new_stride2_in", 2
+)
+ld_i8_block_id2_v2_new_stride2_in = make_ld_i8_block_new_stride2_in(
+    "ld_i8_block_id2_v2_new_stride2_in", 2, stride_val="stride(src,0)"
+)
+
+ld_i8_block_id1_new = make_ld_i8_block_new("ld_i8_block_id1_new", 1)
+ld_i8_block_id1_v2_new = make_ld_i8_block_new(
+    "ld_i8_block_id1_v2_new", 1, stride_val="stride(src,0)"
+)
+
+# ======================================================================
+#  dw conv GEMM patterns for vww and aww: kernel size: 3x3 which padded to (4x4)x16
+
+_gemm_matmul_acc_new = (
+    "gemmini_extended_preload("
+    + "(uint32_t)(&{B_data}), (uint32_t)(&{C_data}) | 0x40000000, "
+    + "{M}, {K}, "
+    + "1, {N}"  # changed {m} to 1
+    + ");\n"
+    + "gemmini_extended_compute_preloaded("
+    + "(uint32_t)(&{A_data}), ~((uint32_t)0), "
+    + "{K}, {N}, "
+    + "16, 16"
+    + ");"
+)
+
+
+@instr(_gemm_matmul_acc_new)
+def matmul_acc_i8_new(
+    N: size,
+    M: size,
+    K: size,
+    A: [i8][N, 16] @ GEMM_SCRATCH_FLEX,
+    B: [i8][K, 16] @ GEMM_SCRATCH_FLEX,
+    C: [i32][N] @ GEMM_ACCUM_FLEX,
+):
+    assert N <= 16
+    assert M <= 16
+    assert K <= 16
+
+    pass
+    for i in seq(0, N):
+        for j in seq(0, M):
+            for k in seq(0, K):
+                a: i32
+                b: i32
+
+                a = A[i, k]
+                b = B[k, j]
+
+                C[i] += a * b
+
+
+@instr(_gemm_matmul_acc_new)
+def do_matmul_acc_i8_new(
+    N: size,
+    M: size,
+    K: size,
+    A: [i8][N, 16] @ GEMM_SCRATCH_FLEX,
+    B: [i8][K, 16] @ GEMM_SCRATCH_FLEX,
+    C: [i32][N] @ GEMM_ACCUM_FLEX,
+):
+    assert N <= 16
+    assert M <= 16
+    assert K <= 16
+
+    for i in seq(0, N):
+        for j in seq(0, M):
+            for k in seq(0, K):
+                a: i32
+                b: i32
+
+                a = A[i, k]
+                b = B[k, j]
+
+                C[i] += a * b
+
+
+def make_matmul_acc_i8_v2_new(p=matmul_acc_i8_new):
+    p = rename(p, "matmul_acc_i8_v2_new")
+    p = write_config(p, p.body().before(), ConfigMatmul, "done", "True")
+    # p = p.configwrite_after('pass', ConfigMatmul, 'done', 'True')
+    p = replace(p, "for i in _:_", do_matmul_acc_i8_new)
+    p = replace(p, "ConfigMatmul.done = True", config_matmul)
+    p = delete_pass(p)
+    p = make_instr(p, _gemm_matmul_acc_new)
+    return p
+
+
+matmul_acc_i8_v2_new = make_matmul_acc_i8_v2_new()
+
+matmul_acc_i8_new = delete_pass(matmul_acc_i8_new)
+matmul_acc_i8_new = make_instr(
+    matmul_acc_i8_new, _gemm_config_matmul + _gemm_matmul_acc
+)
+
+# ----- load bias into res
+_gemm_ld_acc_i32_vec_new = (
+    "gemmini_extended3_config_ld(0, 1.0f, 0, 0);\n"
+    + "gemmini_extended_mvin( ((uint64_t) &{src_data}), ((uint32_t) &{dst_data}), 1, {n} );"  # 16 -> m
+)
+
+
+@instr(_gemm_ld_acc_i32_vec_new)
+def ld_acc_i32_vector_new(
+    n: size,
+    # m: size,  # constant
+    src: [i32][1] @ DRAM,
+    dst: [i32][n] @ GEMM_ACCUM_FLEX,
+):
+    assert n <= 16
+    assert stride(dst, 0) == 1
+    assert stride(src, 0) == 1
+
+    for i in seq(0, n):
+        dst[i] = src[0]
+
+
+_do_gemm_ld_acc_i32_vec_new = "gemmini_extended_mvin( ((uint64_t) &{src_data}), ((uint32_t) &{dst_data}), 1, {n} );"  # 16 -> n
+
+
+@instr(_do_gemm_ld_acc_i32_vec_new)
+def do_ld_acc_i32_vector_new(
+    n: size,
+    src: [i32][1] @ DRAM,
+    dst: [i32][n] @ GEMM_ACCUM_FLEX,
+):
+    assert n <= 16
+    assert stride(dst, 0) == 1
+    assert stride(src, 0) == 1
+
+    for i in seq(0, n):
+        dst[i] = src[0]
+
+
+def make_ld_acc_i32_vector_new(name, p=ld_acc_i32_vector_new):
+    p = rename(p, name)
+    p = write_config(p, p.body().before(), ConfigLoadAcc, "stride_set", "True")
+    # p = p.configwrite_after('pass', ConfigLoadAcc, 'stride_set', 'True')
+    p = replace(p, "for i in _:_", do_ld_acc_i32_vector_new)
+    p = replace(p, "ConfigLoadAcc.stride_set = _", config_ld_acc_i32_vector)
+    p = make_instr(p, _gemm_ld_acc_i32_vec_new)
+    return p
+
+
+ld_acc_i32_vector_v2_new = make_ld_acc_i32_vector_new("ld_acc_i32_vector_v2_new")
+
+# =========== store new
+_gemm_st_acc_i8_new = (
+    "gemmini_extended_config_st({dst}.strides[0]*1, {act}, {scale}[0]);\n"
+    + "gemmini_extended_mvout( ((uint64_t) &{dst_data}), (uint32_t) &{src_data}, 1, {n} );"
+)
+
+
+@instr(_gemm_st_acc_i8_new)
+def st_acc_i8_new(
+    n: size,
+    # m: size,
+    scale: f32,
+    act: bool,
+    src: [i32][n] @ GEMM_ACCUM_FLEX,
+    dst: [i8][n] @ DRAM,
+):
+    assert n <= 16
+    # assert m <= 16
+    # assert stride(dst, 1) == 1
+    # assert stride(src, 0) == 16
+    # assert stride(src, 1) == 1
+
+    for i in seq(0, n):
+        # for j in seq(0, m):
+        src_tmp: i32
+        src_tmp = src[i]
+        tmp: f32
+        acc_scale(src_tmp, tmp, scale)
+        tmp2: i8
+        clamp(tmp, tmp2)
+        if act == True:
+            tmp2 = relu(tmp2)
+        dst[i] = tmp2
+
+
+_gemm_config_st_acc_i8_new = (
+    "gemmini_extended_config_st({dst_stride}, {act}, {scale}[0]);\n"
+)
+
+
+@instr(_gemm_config_st_acc_i8_new)
+def config_st_acc_i8_new(scale: f32, dst_stride: stride, act: bool):
+    ConfigStore.scale = scale
+    ConfigStore.dst_stride = dst_stride
+    ConfigStore.act = act
+
+
+_gemm_st_acc_i8_new = "gemmini_extended_mvout( ((uint64_t) &{dst_data}), (uint32_t) &{src_data}, 1, {n} );"
+
+
+@instr(_gemm_st_acc_i8_new)
+def do_st_acc_i8_new(n: size, src: [i32][n] @ GEMM_ACCUM_FLEX, dst: [i8][n] @ DRAM):
+    assert n <= 16
+    # assert m <= 16
+    # assert stride(dst, 1) == 1
+    # assert stride(src, 0) == 16
+    # assert stride(src, 1) == 1
+
+    for i in seq(0, n):
+        # for j in seq(0, m):
+        src_tmp: i32
+        src_tmp = src[i]
+        tmp: f32
+        acc_scale(src_tmp, tmp, ConfigStore.scale)
+        tmp2: i8
+        clamp(tmp, tmp2)
+        if ConfigStore.act == True:
+            tmp2 = relu(tmp2)
+        dst[i] = tmp2
+
+
+def make_st_acc_i8_v2_new(p=st_acc_i8_new):
+    p = rename(st_acc_i8_new, "st_acc_i8_v2")
+    p = bind_config(p, "scale", ConfigStore, "scale")
+    p = reorder_stmts(p, "tmp : _ ; ConfigStore.scale = _")
+    p = reorder_stmts(p, "src_tmp = _ ; ConfigStore.scale = _")
+    p = reorder_stmts(p, "src_tmp : _ ; ConfigStore.scale = _")
+    p = old_fission_after(p, "ConfigStore.scale = _", n_lifts=2)
+    p = write_config(
+        p,
+        p.find("ConfigStore.scale = _").after(),
+        ConfigStore,
+        "dst_stride",
+        "stride(dst, 0)",
+    )
+    # p = p.configwrite_after('ConfigStore.scale = _', ConfigStore, 'dst_stride', 'stride(dst, 0)')
+    p = bind_config(p, "act", ConfigStore, "act")
+    p = reorder_stmts(p, "clamp(_) ; ConfigStore.act = _")
+    p = reorder_stmts(p, "tmp2 : _ ; ConfigStore.act = _")
+    p = reorder_stmts(p, "acc_scale(_) ; ConfigStore.act = _")
+    p = reorder_stmts(p, "tmp : _ ; ConfigStore.act = _")
+    p = reorder_stmts(p, "src_tmp = _ ; ConfigStore.act = _")
+    p = reorder_stmts(p, "src_tmp : _ ; ConfigStore.act = _")
+    p = old_fission_after(p, "ConfigStore.act = _", n_lifts=2)
+    p = replace(p, "for i in _:_", do_st_acc_i8_new)
+    p = replace(
+        p,
+        "ConfigStore.scale = _ ;" "ConfigStore.dst_stride = _ ;" "ConfigStore.act = _",
+        config_st_acc_i8_new,
+    )
+    return p
+
+
+st_acc_i8_v2_new = make_st_acc_i8_v2_new()
+# ======================================================================
+#  dw conv patterns for vww and aww: kernel size: 3x3 which padded to (4x4)x16
+# ----------------------------------------------------------
+#   -- MVIN Weight
+# ----------------------------------------------------------
+# _gemm_config_ld_dw_w = "gemmini_extended3_config_ld(1, 1.0f, 0, 1);\n"
+
+# @instr(_gemm_config_ld_dw_w)
+# def config_ld_dw_w(stride_set: bool):
+#     ConfigLoadAcc.stride_set = stride_set
+
+# _dw_ld_i8_2Dto1D_w = (
+#     "gemmini_extended3_config_ld(1, "
+#     + "1.0f, 0, 1);\n"
+#     + "gemmini_extended_mvin2( &{src_data}, "
+#     + "((uint64_t) &{dst_data}), 1, 9);"
+# )
+
+# @instr(_dw_ld_i8_2Dto1D_w)
+# def ld_i8_dw_w(
+#     src: [i8][3, 3] @ DRAM,
+#     dst: [i8][9] @ GEMM_SCRATCH_FLEX,
+# ):
+#     # assert n <= 16
+#     # assert ch <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+
+#     for i in seq(0, 3):
+#         for j in seq(0, 3):
+#             dst[i * 3 + j] = src[i, j]
+
+# _do_dw_ld_i8_2Dto1D_w = "gemmini_extended_mvin2( &{src_data}, ((uint64_t) &{dst_data}), 1, 9);"
+# @instr(_do_dw_ld_i8_2Dto1D_w)
+# def do_ld_i8_dw_w(
+#     src: [i8][3, 3] @ DRAM,
+#     dst: [i8][9] @ GEMM_SCRATCH_FLEX,
+# ):
+#     # assert n <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+
+#     for i in seq(0, 3):
+#         for j in seq(0, 3):
+#             dst[i * 3 + j] = src[i, j]
+
+
+# def make_ld_i8_dw_w(name, p=ld_i8_dw_w):
 #     p = rename(p, name)
-#     p = make_instr(p, _gemm_ld_i8_block)
+#     p = write_config(p, p.body().before(), ConfigLoadAcc, "stride_set", "True")
+#     # p = p.configwrite_after('pass', ConfigLoadAcc, 'stride_set', 'True')
+#     p = replace(p, "for i in _:_", do_ld_i8_dw_w)
+#     p = replace(p, "ConfigLoadAcc.stride_set = _", config_ld_dw_w)
+#     p = make_instr(p, _dw_ld_i8_2Dto1D_w)
+#     # print(p)
 #     return p
 
 
-# ld_i8_block_id2_new = make_ld_i8_block_new("ld_i8_block_id2_new", 2)
-# ld_i8_block_id2_v2_new = make_ld_i8_block_new(
-#     "ld_i8_block_id2_v2_new", 2, stride_val="stride(src,0)"
+# ld_i8_dw_w_v2 = make_ld_i8_dw_w("ld_i8_dw_w_v2")
+# ----------------------------------------------------------
+# dw conv patterns for vww and aww: kernel size: 3x3  -- MVIN Input
+# ----------------------------------------------------------
+# _gemm_config_ld_dw_in = "gemmini_extended3_config_ld(9, 1.0f, 0, 2);\n"
+
+# @instr(_gemm_config_ld_dw_in)
+# def config_ld_dw_in(stride_set: bool):
+#     ConfigLoadAcc.stride_set = stride_set
+
+# _dw_ld_i8_in = (
+#     "gemmini_extended3_config_ld(9, "
+#     + "1.0f, 0, 2);\n"
+#     + "gemmini_extended_mvin3( &{src_data}, "
+#     + "((uint64_t) &{dst_data}), 9, {m});"
 # )
 
-# ld_i8_block_id1_new = make_ld_i8_block_new("ld_i8_block_id1_new", 1)
-# ld_i8_block_id1_v2_new = make_ld_i8_block_new(
-#     "ld_i8_block_id1_v2_new", 1, stride_val="stride(src,0)"
+# @instr(_dw_ld_i8_in)
+# def ld_i8_dw_in(
+#     m: size,
+#     src: [i8][m, 3, 3] @ DRAM,
+#     dst: [i8][m, 9] @ GEMM_SCRATCH_FLEX,
+# ):
+#     assert m <= 16
+#     # assert ch <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+#     for k in seq(0, m):
+#         for i in seq(0, 3):
+#             for j in seq(0, 3):
+#                 dst[k, i * 3 + j] = src[k, i, j]
+
+# _do_dw_ld_i8_in = "gemmini_extended_mvin3( &{src_data}, ((uint64_t) &{dst_data}), 9, {m});"
+# @instr(_do_dw_ld_i8_in)
+# def do_ld_i8_dw_in(
+#     m: size,
+#     src: [i8][m, 3, 3] @ DRAM,
+#     dst: [i8][m, 9] @ GEMM_SCRATCH_FLEX,
+# ):
+#     assert m <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+
+#     for k in seq(0, m):
+#         for i in seq(0, 3):
+#             for j in seq(0, 3):
+#                 dst[k, i * 3 + j] = src[k, i, j]
+
+
+# def make_ld_i8_dw_in(name, p=ld_i8_dw_in):
+#     p = rename(p, name)
+#     p = write_config(p, p.body().before(), ConfigLoadAcc, "stride_set", "True")
+#     # p = p.configwrite_after('pass', ConfigLoadAcc, 'stride_set', 'True')
+#     p = replace(p, "for k in _:_", do_ld_i8_dw_in)
+#     p = replace(p, "ConfigLoadAcc.stride_set = _", config_ld_dw_in)
+#     p = make_instr(p, _dw_ld_i8_in)
+#     # print(p)
+#     return p
+
+
+# ld_i8_dw_in_v2 = make_ld_i8_dw_in("ld_i8_dw_in_v2")
+
+# #----------------------------------------------------------
+# # dw conv patterns for vww and aww: kernel size: 4x4  -- GEMM
+# #----------------------------------------------------------
+# _dw_gemm_matmul_acc = (
+#     "gemmini_extended_preload("
+#     + "(uint32_t)(&{B_data}), (uint32_t)(&{C_data}) | 0x40000000, "
+#     + "1, 9, "
+#     + "1, {N}"
+#     + ");\n"
+#     + "gemmini_extended_compute_preloaded("
+#     + "(uint32_t)(&{A_data}), ~((uint32_t)0), "
+#     + "9, {N}, "
+#     + "16, 16"
+#     + ");"
 # )
 
+
+# @instr(_dw_gemm_matmul_acc)
+# def dw_matmul_acc_i8(
+#     N: size,
+#     A: [i8][N, 9] @ GEMM_SCRATCH_FLEX,
+#     B: [i8][9] @ GEMM_SCRATCH_FLEX,
+#     C: [i32][N] @ GEMM_ACCUM,
+# ):
+#     assert N <= 16
+#     # assert M <= 16
+#     # assert K <= 16
+
+#     pass
+#     for i in seq(0, N):
+#         for k0 in seq(0, 3):
+#             for k1 in seq(0, 3):
+#                 a: i32
+#                 b: i32
+
+#                 a = A[i, k1 + k0*3]
+#                 b = B[k1 + k0*3]
+
+#                 C[i] += a * b
+
+
+# @instr(_dw_gemm_matmul_acc)
+# def do_dw_matmul_acc_i8(
+#     N: size,
+#     A: [i8][N, 9] @ GEMM_SCRATCH_FLEX,
+#     B: [i8][9] @ GEMM_SCRATCH_FLEX,
+#     C: [i32][N] @ GEMM_ACCUM,
+# ):
+#     assert N <= 16
+#     # assert M <= 16
+#     # assert K <= 16
+
+#     for i in seq(0, N):
+#         for k0 in seq(0, 3):
+#             for k1 in seq(0, 3):
+#                 a: i32
+#                 b: i32
+
+#                 a = A[i, k1 + k0*3]
+#                 b = B[k1 + k0*3]
+
+#                 C[i] += a * b
+
+
+# def make_dw_matmul_acc_i8_v2(p=dw_matmul_acc_i8):
+#     p = rename(p, "dw_matmul_acc_i8_v2")
+#     p = write_config(p, p.body().before(), ConfigMatmul, "done", "True")
+#     # p = p.configwrite_after('pass', ConfigMatmul, 'done', 'True')
+#     p = replace(p, "for i in _:_", do_dw_matmul_acc_i8)
+#     p = replace(p, "ConfigMatmul.done = True", config_matmul)
+#     p = delete_pass(p)
+#     p = make_instr(p, _dw_gemm_matmul_acc)
+#     return p
+
+
+# dw_matmul_acc_i8_v2 = make_dw_matmul_acc_i8_v2()
+
+# dw_matmul_acc_i8 = delete_pass(dw_matmul_acc_i8)
+# dw_matmul_acc_i8 = make_instr(dw_matmul_acc_i8, _gemm_config_matmul + _dw_gemm_matmul_acc)
+
+# ======================================================================
+# ----------------------------------------------------------
+# dw conv patterns for vww and aww: kernel size: 3x3  -- MVIN Weight
+# ----------------------------------------------------------
+# _gemm_config_ld_dw_w = "gemmini_extended3_config_ld(1, 1.0f, 0, 1);\n"
+
+# @instr(_gemm_config_ld_dw_w)
+# def config_ld_dw_w(stride_set: bool):
+#     ConfigLoadAcc.stride_set = stride_set
+
+# _dw_ld_i8_2Dto1D_w = (
+#     "gemmini_extended3_config_ld(1, "
+#     + "1.0f, 0, 1);\n"
+#     + "gemmini_extended_mvin2( &{src_data}, "
+#     + "((uint64_t) &{dst_data}), 1, 9);"
+# )
+
+# @instr(_dw_ld_i8_2Dto1D_w)
+# def ld_i8_dw_w(
+#     src: [i8][3, 3] @ DRAM,
+#     dst: [i8][9] @ GEMM_SCRATCH_FLEX,
+# ):
+#     # assert n <= 16
+#     # assert ch <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+
+#     for i in seq(0, 3):
+#         for j in seq(0, 3):
+#             dst[i * 3 + j] = src[i, j]
+
+# _do_dw_ld_i8_2Dto1D_w = "gemmini_extended_mvin2( &{src_data}, ((uint64_t) &{dst_data}), 1, 9);"
+# @instr(_do_dw_ld_i8_2Dto1D_w)
+# def do_ld_i8_dw_w(
+#     src: [i8][3, 3] @ DRAM,
+#     dst: [i8][9] @ GEMM_SCRATCH_FLEX,
+# ):
+#     # assert n <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+
+#     for i in seq(0, 3):
+#         for j in seq(0, 3):
+#             dst[i * 3 + j] = src[i, j]
+
+
+# def make_ld_i8_dw_w(name, p=ld_i8_dw_w):
+#     p = rename(p, name)
+#     p = write_config(p, p.body().before(), ConfigLoadAcc, "stride_set", "True")
+#     # p = p.configwrite_after('pass', ConfigLoadAcc, 'stride_set', 'True')
+#     p = replace(p, "for i in _:_", do_ld_i8_dw_w)
+#     p = replace(p, "ConfigLoadAcc.stride_set = _", config_ld_dw_w)
+#     p = make_instr(p, _dw_ld_i8_2Dto1D_w)
+#     # print(p)
+#     return p
+
+
+# ld_i8_dw_w_v2 = make_ld_i8_dw_w("ld_i8_dw_w_v2")
+# #----------------------------------------------------------
+# # dw conv patterns for vww and aww: kernel size: 3x3  -- MVIN Input
+# #----------------------------------------------------------
+# _gemm_config_ld_dw_in = "gemmini_extended3_config_ld(9, 1.0f, 0, 2);\n"
+
+# @instr(_gemm_config_ld_dw_in)
+# def config_ld_dw_in(stride_set: bool):
+#     ConfigLoadAcc.stride_set = stride_set
+
+# _dw_ld_i8_in = (
+#     "gemmini_extended3_config_ld(9, "
+#     + "1.0f, 0, 2);\n"
+#     + "gemmini_extended_mvin3( &{src_data}, "
+#     + "((uint64_t) &{dst_data}), 9, {m});"
+# )
+
+# @instr(_dw_ld_i8_in)
+# def ld_i8_dw_in(
+#     m: size,
+#     src: [i8][m, 3, 3] @ DRAM,
+#     dst: [i8][m, 9] @ GEMM_SCRATCH_FLEX,
+# ):
+#     assert m <= 16
+#     # assert ch <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+#     for k in seq(0, m):
+#         for i in seq(0, 3):
+#             for j in seq(0, 3):
+#                 dst[k, i * 3 + j] = src[k, i, j]
+
+# _do_dw_ld_i8_in = "gemmini_extended_mvin3( &{src_data}, ((uint64_t) &{dst_data}), 9, {m});"
+# @instr(_do_dw_ld_i8_in)
+# def do_ld_i8_dw_in(
+#     m: size,
+#     src: [i8][m, 3, 3] @ DRAM,
+#     dst: [i8][m, 9] @ GEMM_SCRATCH_FLEX,
+# ):
+#     assert m <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+
+#     for k in seq(0, m):
+#         for i in seq(0, 3):
+#             for j in seq(0, 3):
+#                 dst[k, i * 3 + j] = src[k, i, j]
+
+
+# def make_ld_i8_dw_in(name, p=ld_i8_dw_in):
+#     p = rename(p, name)
+#     p = write_config(p, p.body().before(), ConfigLoadAcc, "stride_set", "True")
+#     # p = p.configwrite_after('pass', ConfigLoadAcc, 'stride_set', 'True')
+#     p = replace(p, "for k in _:_", do_ld_i8_dw_in)
+#     p = replace(p, "ConfigLoadAcc.stride_set = _", config_ld_dw_in)
+#     p = make_instr(p, _dw_ld_i8_in)
+#     # print(p)
+#     return p
+
+
+# ld_i8_dw_in_v2 = make_ld_i8_dw_in("ld_i8_dw_in_v2")
+
+# #----------------------------------------------------------
+# # dw conv patterns for vww and aww: kernel size: 3x3  -- GEMM
+# #----------------------------------------------------------
+# _dw_gemm_matmul_acc = (
+#     "gemmini_extended_preload("
+#     + "(uint32_t)(&{B_data}), (uint32_t)(&{C_data}) | 0x40000000, "
+#     + "1, 9, "
+#     + "1, {N}"
+#     + ");\n"
+#     + "gemmini_extended_compute_preloaded("
+#     + "(uint32_t)(&{A_data}), ~((uint32_t)0), "
+#     + "9, {N}, "
+#     + "16, 16"
+#     + ");"
+# )
+
+
+# @instr(_dw_gemm_matmul_acc)
+# def dw_matmul_acc_i8(
+#     N: size,
+#     A: [i8][N, 9] @ GEMM_SCRATCH_FLEX,
+#     B: [i8][9] @ GEMM_SCRATCH_FLEX,
+#     C: [i32][N] @ GEMM_ACCUM,
+# ):
+#     assert N <= 16
+#     # assert M <= 16
+#     # assert K <= 16
+
+#     pass
+#     for i in seq(0, N):
+#         for k0 in seq(0, 3):
+#             for k1 in seq(0, 3):
+#                 a: i32
+#                 b: i32
+
+#                 a = A[i, k1 + k0*3]
+#                 b = B[k1 + k0*3]
+
+#                 C[i] += a * b
+
+
+# @instr(_dw_gemm_matmul_acc)
+# def do_dw_matmul_acc_i8(
+#     N: size,
+#     A: [i8][N, 9] @ GEMM_SCRATCH_FLEX,
+#     B: [i8][9] @ GEMM_SCRATCH_FLEX,
+#     C: [i32][N] @ GEMM_ACCUM,
+# ):
+#     assert N <= 16
+#     # assert M <= 16
+#     # assert K <= 16
+
+#     for i in seq(0, N):
+#         for k0 in seq(0, 3):
+#             for k1 in seq(0, 3):
+#                 a: i32
+#                 b: i32
+
+#                 a = A[i, k1 + k0*3]
+#                 b = B[k1 + k0*3]
+
+#                 C[i] += a * b
+
+
+# def make_dw_matmul_acc_i8_v2(p=dw_matmul_acc_i8):
+#     p = rename(p, "dw_matmul_acc_i8_v2")
+#     p = write_config(p, p.body().before(), ConfigMatmul, "done", "True")
+#     # p = p.configwrite_after('pass', ConfigMatmul, 'done', 'True')
+#     p = replace(p, "for i in _:_", do_dw_matmul_acc_i8)
+#     p = replace(p, "ConfigMatmul.done = True", config_matmul)
+#     p = delete_pass(p)
+#     p = make_instr(p, _dw_gemm_matmul_acc)
+#     return p
+
+
+# dw_matmul_acc_i8_v2 = make_dw_matmul_acc_i8_v2()
+
+# dw_matmul_acc_i8 = delete_pass(dw_matmul_acc_i8)
+# dw_matmul_acc_i8 = make_instr(dw_matmul_acc_i8, _gemm_config_matmul + _dw_gemm_matmul_acc)
+# -------------------------------------------------------------------------
+# _gemm_config_ld_dw_w = "gemmini_extended3_config_ld(1, 1.0f, 0, 1);\n"
+
+# @instr(_gemm_config_ld_dw_w)
+# def config_ld_dw_w(stride_set: bool):
+#     ConfigLoadAcc.stride_set = stride_set
+
+# _dw_ld_i8_2Dto1D_w = (
+#     "gemmini_extended3_config_ld(1, "
+#     + "1.0f, 0, 1);\n"
+#     + "gemmini_extended_mvin2( &{src_data}, "
+#     + "((uint64_t) &{dst_data}), {ch}, 9);"
+# )
+
+# @instr(_dw_ld_i8_2Dto1D_w)
+# def ld_i8_dw_w(
+#     ch: size,
+#     src: [i8][ch, 3, 3] @ DRAM,
+#     dst: [i8][9, ch] @ GEMM_SCRATCH,
+# ):
+#     # assert n <= 16
+#     assert ch <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+
+#     for c in seq(0, ch):
+#         for i in seq(0, 3):
+#             for j in seq(0, 3):
+#                 dst[i * 3 + j, c] = src[c, i, j]
+
+# _do_dw_ld_i8_2Dto1D_w = "gemmini_extended_mvin2( &{src_data}, ((uint64_t) &{dst_data}), {ch}, 9);"
+# @instr(_do_dw_ld_i8_2Dto1D_w)
+# def do_ld_i8_dw_w(
+#     ch: size,
+#     src: [i8][ch, 3, 3] @ DRAM,
+#     dst: [i8][9, ch] @ GEMM_SCRATCH,
+# ):
+#     # assert n <= 16
+#     assert ch <= 16
+#     # assert stride(src, 0) == 1
+#     # assert stride(dst, 0) == 1
+#     # assert stride(dst, 1) == 1
+
+#     for c in seq(0, ch):
+#         for i in seq(0, 3):
+#             for j in seq(0, 3):
+#                 dst[i * 3 + j, c] = src[c, i, j]
+
+
+# def make_ld_i8_dw_w(name, p=ld_i8_dw_w):
+#     p = rename(p, name)
+#     p = write_config(p, p.body().before(), ConfigLoadAcc, "stride_set", "True")
+#     # p = p.configwrite_after('pass', ConfigLoadAcc, 'stride_set', 'True')
+#     p = replace(p, "for c in _:_", do_ld_i8_dw_w)
+#     p = replace(p, "ConfigLoadAcc.stride_set = _", config_ld_dw_w)
+#     p = make_instr(p, _dw_ld_i8_2Dto1D_w)
+#     # print(p)
+#     return p
+
+
+# ld_i8_dw_w_v2 = make_ld_i8_dw_w("ld_i8_dw_w_v2")
+# -----
 
 # --------------------------------------------------------------------------- #
 # conv patterns
@@ -1423,12 +2818,29 @@ matmul_acc_i8 = make_instr(matmul_acc_i8, _gemm_config_matmul + _gemm_matmul_acc
 
 # @instr(_gemm_ld_i8_block_conv)
 # def ld_i8_block_conv(
-#     B: size,
-#     OH: size,
-#     OW: size,
-#     KH: size,
-#     KW: size,
-#     KCH: size,
+#     n: size,
+#     m: size,
+#     src: [i8] @ DRAM,
+#     dst: [i8][n, m, 16] @ GEMM_SCRATCH,
+# ):
+#     assert n <= 16
+#     assert m <= 4
+#     assert stride(src, 1) == 1
+#     assert stride(dst, 0) == 16
+#     assert stride(dst, 1) == 1
+
+#     for ko in seq(0, m):
+#         for i in seq(0, n):
+#             for ki in seq(0, 16):
+#                 dst[ko, i, ki] = src[i/(256), (i%(256)/16 + (ko * 16 + ki)/(KCH*KW), (i%(OH*OW))%OW + (ko * 16 + ki)/KCH % KW, (ko * 16 + ki)%KCH]
+# @instr(_gemm_ld_i8_block_conv)
+# def ld_i8_block_conv(
+#     B: 4,
+#     OH: ?,
+#     OW: ?,
+#     KH: ?,
+#     KW: ?,
+#     KCH: ?,
 #     n: size,
 #     m: size,
 #     src: [i8][n/(OH*OW), n/(B*OW), n/(B*OH), (m*16)/(KW*KH)] @ DRAM,
@@ -1444,10 +2856,7 @@ matmul_acc_i8 = make_instr(matmul_acc_i8, _gemm_config_matmul + _gemm_matmul_acc
 #         for i in seq(0, n):
 #             for ki in seq(0, 16):
 #                 dst[ko, i, ki] = src[i/(OH*OW), (i%(OH*OW))/OW + (ko * 16 + ki)/(KCH*KW), (i%(OH*OW))%OW + (ko * 16 + ki)/KCH % KW, (ko * 16 + ki)%KCH]
-#     # for i in seq(0, n):
-#     #     for j in seq(0, m):
-#     #         for k in seq(0, 16):
-#     #             dst[j, i, k] = src[i, 16 * j + k]
+
 
 # def make_do_ld_i8_block_conv(name, instr_str, p=ld_i8_block_conv):
 #     p = rename(p, name)

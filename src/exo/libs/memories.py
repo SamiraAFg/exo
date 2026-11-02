@@ -122,6 +122,7 @@ class GEMM_SCRATCH(Memory):
     def window(cls, basetyp, baseptr, indices, strides, srcinfo):
         # assume that strides[-1] == 1
         #    and that strides[-2] == 16 (if there is a strides[-2])
+        print(baseptr, indices, strides)
         assert len(indices) == len(strides) and len(strides) >= 2
         prim_type = basetyp.basetype().ctype()
         offset = generate_offset(indices, strides)
@@ -175,7 +176,182 @@ class GEMM_ACCUM(Memory):
         # assume that strides[-1] == 1
         #    and that strides[-2] == 16 (if there is a strides[-2])
         assert len(indices) == len(strides) and len(strides) >= 2
+        # print(baseptr, indices, strides)
         prim_type = basetyp.basetype().ctype()
+        offset = generate_offset(indices, strides)
+        return (
+            f"*({prim_type}*)((uint64_t)( "
+            f"((uint32_t)((uint64_t){baseptr})) + "
+            f"({offset})/16))"
+        )
+
+
+# ----------- GEMMINI scratchpad (flexible, allows innermost dim < 16) ----------------
+#
+# GEMM_SCRATCH_FLEX allows allocation of scratchpad buffers with innermost dimension < 16.
+# Hardware confirmed to support 1-16 columns natively (see gemmini-rocc-tests/padded.c).
+#
+
+
+class GEMM_SCRATCH_FLEX(Memory):
+    """
+    Flexible Gemmini scratchpad that supports innermost dimension in [1, 16].
+
+    Hardware confirmed to work with any sub-16 dimension (see gemmini-rocc-tests/padded.c).
+    This version allocates with actual shape (no padding) and uses a stride-aware window.
+
+    Key difference from GEMM_SCRATCH:
+    - Allocates with actual shape [m, n, k] where k ∈ [1, 16]
+    - assume stride[-2] == 16
+    - Must be used with compatible instructions/scheduling
+    """
+
+    @classmethod
+    def global_(cls):
+        return '#include <include/gemmini.h>\n#include "gemm_malloc.h"'
+
+    @classmethod
+    def alloc(cls, new_name, prim_type, shape, srcinfo):
+        if len(shape) == 0:
+            return f"{prim_type} {new_name};"
+
+        if not shape[-1].isdecimal():
+            raise MemGenError(
+                f"{srcinfo}: "
+                "GEMM_SCRATCH_FLEX requires constant innermost dimension "
+                f"(got {shape[-1]})"
+            )
+
+        inner_dim = int(shape[-1])
+        if not (1 <= inner_dim <= 16):
+            raise MemGenError(
+                f"{srcinfo}: "
+                "GEMM_SCRATCH_FLEX innermost dimension must be in range [1, 16], "
+                f"got {inner_dim}"
+            )
+
+        # Allocate with ACTUAL shape - NO PADDING!
+        # Hardware supports this natively (proven in gemmini-rocc-tests/padded.c)
+        size_str = shape[0]
+        for s in shape[1:]:
+            size_str = f"{s} * {size_str}"
+
+        return (
+            f"{prim_type} *{new_name} = "
+            f"({prim_type}*) ((uint64_t)gemm_malloc ({size_str} * sizeof({prim_type})));"
+        )
+
+    @classmethod
+    def can_read(cls):
+        return False
+
+    @classmethod
+    def free(cls, new_name, prim_type, shape, srcinfo):
+        if len(shape) == 0:
+            return ""
+
+        return f"gemm_free((uint64_t)({new_name}));"
+
+    @classmethod
+    def window(cls, basetyp, baseptr, indices, strides, srcinfo):
+        # assume that strides[-1] == 1
+        #    and that strides[-2] == 16 (if there is a strides[-2])
+        assert len(indices) == len(strides) and len(strides) >= 2
+        prim_type = basetyp.basetype().ctype()
+
+        strides.append(1)
+        const = strides[-2]
+        if int(const) < 16:
+            for i in range(len(strides) - 1):
+                strides[i] = str((int(strides[i]) / int(const)) * 16)
+
+        offset = generate_offset(indices, strides)
+        return (
+            f"*({prim_type}*)((uint64_t)( "
+            f"((uint32_t)((uint64_t){baseptr})) + "
+            f"({offset})/16))"
+        )
+
+
+# ----------- GEMMINI accumulator (flexible, allows innermost dim < 16) ----------------
+#
+# GEMM_ACCUM_FLEX allows allocation of accumulator buffers with innermost dimension < 16.
+# Hardware confirmed to support 1-16 columns natively (see gemmini-rocc-tests/padded.c).
+#
+
+
+class GEMM_ACCUM_FLEX(Memory):
+    """
+    Flexible Gemmini accumulator that supports innermost dimension in [1, 16].
+
+    Hardware confirmed to work with any sub-16 dimension (see gemmini-rocc-tests/padded.c).
+    This version allocates with actual shape (no padding) and uses a stride-aware window.
+
+    Key difference from GEMM_ACCUM:
+    - Allocates with actual shape [m, n, k] where k ∈ [1, 16]
+    - assume stride[-2] == 16
+    - Must be used with compatible instructions/scheduling
+    """
+
+    @classmethod
+    def global_(cls):
+        return '#include <include/gemmini.h>\n#include "gemm_acc_malloc.h"'
+
+    @classmethod
+    def alloc(cls, new_name, prim_type, shape, srcinfo):
+        if len(shape) == 0:
+            return f"{prim_type} {new_name};"
+
+        if not shape[-1].isdecimal():
+            raise MemGenError(
+                f"{srcinfo}: "
+                "GEMM_ACCUM_FLEX requires constant innermost dimension "
+                f"(got {shape[-1]})"
+            )
+
+        inner_dim = int(shape[-1])
+        if not (1 <= inner_dim <= 16):
+            raise MemGenError(
+                f"{srcinfo}: "
+                "GEMM_ACCUM_FLEX innermost dimension must be in range [1, 16], "
+                f"got {inner_dim}"
+            )
+
+        # Allocate with ACTUAL shape - NO PADDING!
+        # Hardware supports this natively (proven in gemmini-rocc-tests/padded.c)
+        size_str = shape[0]
+        for s in shape[1:]:
+            size_str = f"{s} * {size_str}"
+
+        return (
+            f"{prim_type} *{new_name} = "
+            f"({prim_type}*) ((uint32_t)gemm_acc_malloc ({size_str} * sizeof({prim_type})));"
+        )
+
+    @classmethod
+    def can_read(cls):
+        return False
+
+    @classmethod
+    def free(cls, new_name, prim_type, shape, srcinfo):
+        if len(shape) == 0:
+            return ""
+
+        return f"gemm_acc_free((uint32_t)({new_name}));"
+
+    @classmethod
+    def window(cls, basetyp, baseptr, indices, strides, srcinfo):
+        # assume that strides[-1] == 1
+        #    and that strides[-2] == 16 (if there is a strides[-2])
+        assert len(indices) == len(strides) and len(strides) >= 2
+        prim_type = basetyp.basetype().ctype()
+        strides.append(1)
+        const = strides[-2]
+
+        if int(const) < 16:
+            for i in range(len(strides) - 1):
+                strides[i] = str((int(strides[i]) / int(const)) * 16)
+
         offset = generate_offset(indices, strides)
         return (
             f"*({prim_type}*)((uint64_t)( "
